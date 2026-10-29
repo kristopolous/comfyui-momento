@@ -18,6 +18,11 @@ from .director import DIRECTOR, QUIET, VIDEO_NEGATIVE  # noqa: F401
 
 WEB_DIRECTORY = "./web"
 
+try:  # the Instagram-style page and its routes; only when running inside ComfyUI's server
+    from . import server  # noqa: F401
+except ImportError:
+    pass
+
 
 
 

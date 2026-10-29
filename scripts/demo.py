@@ -44,28 +44,70 @@ GRID = (596, 175, 131, 174.3)       # left, top, cell width, cell height
 ACCENT = (255, 196, 64)
 
 
-def profile_card(path, shot, cell=None, caption=None, sub=None):
+def _ants(d, points, phase, dash=14, width=5):
+    """Marching ants along a closed polyline: alternating dark/accent dashes, shifted by `phase` pixels."""
+    pts = points + points[:1]
+    t = -phase
+    for (x0, y0), (x1, y1) in zip(pts, pts[1:]):
+        length = max(1e-6, ((x1 - x0) ** 2 + (y1 - y0) ** 2) ** 0.5)
+        pos = 0.0
+        while pos < length:
+            k = int((t + pos) // dash)
+            end = min(length, max(pos + 0.5, pos + dash - ((t + pos) % dash)))  # always advance (float rounding)
+            color = ACCENT if k % 2 == 0 else (20, 20, 24)
+            p0 = (x0 + (x1 - x0) * pos / length, y0 + (y1 - y0) * pos / length)
+            p1 = (x0 + (x1 - x0) * end / length, y0 + (y1 - y0) * end / length)
+            d.line([p0, p1], fill=color, width=width)
+            pos = end
+        t += length
+
+
+def _circle(cx, cy, r, n=72):
+    import math
+    return [(cx + r * math.cos(2 * math.pi * i / n), cy + r * math.sin(2 * math.pi * i / n)) for i in range(n)]
+
+
+def profile_card(path, shot, cell=None, caption=None, sub=None, phase=0.0):
+    """One frame of the profile screenshot. With `cell`, everything but the profile picture and that post is dimmed
+    and both get marching ants (advance `phase` frame to frame to make them march)."""
     im = Image.new("RGB", (W, H), (8, 8, 10))
-    src = Image.open(shot).convert("RGB")
-    d0 = ImageDraw.Draw(src)
+    src = Image.open(shot).convert("RGB").crop(SHOT_CROP)
+    scale = (H - 40) / src.height
+    src = src.resize((round(src.width * scale), H - 40), Image.LANCZOS)
+    ox, oy = 120, 20
+    to = lambda x, y: ((x - SHOT_CROP[0]) * scale + ox, (y - SHOT_CROP[1]) * scale + oy)  # noqa: E731
+    im.paste(src, (ox, oy))
     if cell is not None:
         x, y, r = PIC
-        d0.ellipse((x - r - 4, y - r - 4, x + r + 4, y + r + 4), outline=ACCENT, width=5)
         left, top, cw, ch = GRID
         row, col = cell
-        bx, by = left + col * cw, top + row * ch
-        d0.rectangle((bx + 1, by + 1, bx + cw - 1, by + ch - 1), outline=ACCENT, width=6)
-    crop = src.crop(SHOT_CROP)
-    scale = (H - 40) / crop.height
-    crop = crop.resize((round(crop.width * scale), H - 40), Image.LANCZOS)
-    im.paste(crop, (120, 20))
+        (bx0, by0), (bx1, by1) = to(left + col * cw, top + row * ch), to(left + (col + 1) * cw, top + (row + 1) * ch)
+        (cx, cy), rr = to(x, y), (r + 3) * scale
+        mask = Image.new("L", (W, H), 0)
+        md = ImageDraw.Draw(mask)
+        md.rectangle((bx0, by0, bx1, by1), fill=255)
+        md.ellipse((cx - rr, cy - rr, cx + rr, cy + rr), fill=255)
+        im = Image.composite(im, Image.eval(im, lambda v: int(v * 0.28)), mask)
+        d = ImageDraw.Draw(im)
+        _ants(d, [(bx0 - 4, by0 - 4), (bx1 + 4, by0 - 4), (bx1 + 4, by1 + 4), (bx0 - 4, by1 + 4)], phase)
+        _ants(d, _circle(cx, cy, rr + 6), phase)
     d = ImageDraw.Draw(im)
-    tx = 120 + crop.width + 70
+    tx = ox + src.width + 70
     if caption:
         d.text((tx, H // 2 - 50), caption, font=font("Bold", 40), fill=(245, 245, 245))
     if sub:
         d.text((tx, H // 2 + 6), sub, font=font("Light", 28), fill=ACCENT if cell is not None else (170, 170, 175))
     im.save(path)
+
+
+def ants_clip(shot, cell, seconds, out, **text):
+    """The highlighted profile with the ants marching, as a clip."""
+    frames = Path(tempfile.mkdtemp())
+    for i in range(round(seconds * FPS)):
+        profile_card(frames / f"{i:04d}.png", shot, cell, phase=i * 2.0, **text)
+    ff("-framerate", str(FPS), "-i", str(frames / "%04d.png"), "-f", "lavfi", "-t", str(seconds),
+       "-i", "anullsrc=r=48000:cl=stereo", "-vf", f"setsar=1,format=yuv420p,fade=in:st=0:d=0.15",
+       "-c:v", "libx264", "-c:a", "aac", "-shortest", out)
 
 
 def still_clip(png, seconds, out, fade=0.4):
@@ -113,8 +155,8 @@ def main(out, clips, shot=None):
         seg = []
         if shot and where:
             row, col = (int(v) for v in where.split(","))
-            profile_card(tmp / f"pick{i}.png", shot, (row, col), caption="The profile picture", sub="+ this post")
-            still_clip(str(tmp / f"pick{i}.png"), 2.0, str(tmp / f"pick{i}.mp4"), fade=0.15)
+            ants_clip(shot, (row, col), 2.4, str(tmp / f"pick{i}.mp4"), caption="The profile picture",
+                      sub="+ this post")
             seg.append(tmp / f"pick{i}.mp4")
         stage(c, str(tmp / f"clip{i}.mp4"))
         staged.append(seg + [tmp / f"clip{i}.mp4"])

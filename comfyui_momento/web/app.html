@@ -1,0 +1,311 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Momento</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Montserrat:wght@300;500;700;900&display=swap" rel="stylesheet">
+<style>
+  :root { --bg: #000; --fg: #f5f5f5; --dim: #a8a8a8; --line: #262626; --accent: #ffc440; --blue: #0095f6; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; background: var(--bg); color: var(--fg); font: 14px/1.4 -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
+  button { font: inherit; cursor: pointer; }
+  .brand { font-family: Montserrat, sans-serif; font-weight: 900; letter-spacing: .02em; }
+
+  /* landing */
+  #landing { min-height: 100vh; display: grid; place-items: center; padding: 24px 16px; }
+  #landing .card { width: 100%; max-width: 380px; text-align: center; }
+  #landing h1 { font-size: 56px; margin: 0 0 6px; }
+  #landing p { color: var(--dim); margin: 0 0 28px; font-size: 15px; }
+  .field { display: flex; align-items: center; background: #121212; border: 1px solid var(--line); border-radius: 10px; padding: 0 12px; }
+  .field span { color: var(--dim); font-size: 16px; }
+  .field input { flex: 1; background: none; border: 0; outline: 0; color: var(--fg); font-size: 16px; padding: 14px 6px; }
+  .primary { width: 100%; margin-top: 12px; background: var(--blue); color: #fff; border: 0; border-radius: 10px; padding: 12px; font-weight: 600; font-size: 15px; }
+  .primary:disabled { opacity: .5; cursor: default; }
+  .hint { margin-top: 16px; color: var(--dim); font-size: 13px; }
+  .hint a { color: var(--fg); text-decoration: none; font-weight: 600; }
+  .error { margin-top: 14px; color: #ff6b6b; font-size: 13px; min-height: 18px; }
+
+  /* profile */
+  #profile { display: none; max-width: 935px; margin: 0 auto; padding: 0 16px 60px; }
+  .top { display: flex; align-items: center; justify-content: space-between; height: 60px; border-bottom: 1px solid var(--line); margin: 0 -16px; padding: 0 16px; }
+  .top .brand { font-size: 22px; }
+  .top button { background: none; border: 0; color: var(--dim); }
+  header.me { display: flex; align-items: center; gap: 28px; padding: 34px 0 28px; }
+  .ring { flex: none; width: 150px; height: 150px; border-radius: 50%; padding: 4px; background: conic-gradient(#feda75, #fa7e1e, #d62976, #962fbf, #4f5bd5, #feda75); }
+  .ring img { width: 100%; height: 100%; border-radius: 50%; border: 4px solid var(--bg); object-fit: cover; display: block; }
+  .me h2 { font-size: 20px; font-weight: 400; margin: 0 0 14px; }
+  .me .stats { color: var(--fg); margin-bottom: 12px; }
+  .me .bio { color: var(--dim); }
+  .me .bio b { color: var(--accent); font-weight: 600; }
+  .tabs { border-top: 1px solid var(--line); display: flex; justify-content: center; }
+  .tabs div { border-top: 1px solid var(--fg); margin-top: -1px; padding: 14px 4px; font-size: 12px; letter-spacing: .1em; font-weight: 600; }
+  .grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 4px; }
+  .grid button { position: relative; padding: 0; border: 0; background: #111; aspect-ratio: 3 / 4; overflow: hidden; }
+  .grid img { width: 100%; height: 100%; object-fit: cover; display: block; transition: filter .15s; }
+  .grid button::after { content: "▶ Momento"; position: absolute; inset: auto 0 0 0; padding: 10px; font: 700 13px Montserrat, sans-serif;
+    color: #fff; background: linear-gradient(transparent, rgba(0,0,0,.75)); opacity: 0; transition: opacity .15s; text-align: left; }
+  .grid button:hover img { filter: brightness(.8); }
+  .grid button:hover::after { opacity: 1; }
+  @media (max-width: 640px) {
+    header.me { gap: 18px; padding: 20px 0; }
+    .ring { width: 86px; height: 86px; }
+    .me h2 { font-size: 18px; margin-bottom: 8px; }
+    .grid { gap: 2px; }
+    .grid button::after { opacity: 1; padding: 6px; font-size: 11px; }
+  }
+
+  /* the moment */
+  #moment { display: none; position: fixed; inset: 0; background: rgba(0,0,0,.88); z-index: 10; align-items: center; justify-content: center; padding: 16px; }
+  #moment.open { display: flex; }
+  .sheet { display: flex; max-width: 920px; width: 100%; max-height: calc(100vh - 32px); background: #000; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
+  .stage { position: relative; flex: none; width: min(56vh, 100%); aspect-ratio: 9 / 16; background: #000; }
+  .stage img, .stage video { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; }
+  .stage .scan { position: absolute; inset: 0; background: linear-gradient(transparent 40%, rgba(255,196,64,.18) 50%, transparent 60%);
+    background-size: 100% 300%; animation: scan 2.2s linear infinite; display: none; }
+  .working .stage .scan { display: block; }
+  @keyframes scan { from { background-position: 0 0; } to { background-position: 0 100%; } }
+  .side { flex: 1; display: flex; flex-direction: column; min-width: 0; border-left: 1px solid var(--line); }
+  .side .who { display: flex; align-items: center; gap: 10px; padding: 14px; border-bottom: 1px solid var(--line); font-weight: 600; }
+  .side .who img { width: 32px; height: 32px; border-radius: 50%; object-fit: cover; }
+  .side .who button { margin-left: auto; background: none; border: 0; color: var(--fg); font-size: 22px; line-height: 1; }
+  .side .body { flex: 1; padding: 18px 16px; overflow: auto; }
+  .side h3 { font-family: Montserrat, sans-serif; font-weight: 700; font-size: 20px; margin: 0 0 6px; }
+  .side .sub { color: var(--dim); margin: 0 0 18px; }
+  .steps { list-style: none; padding: 0; margin: 0; }
+  .steps li { display: flex; gap: 10px; align-items: baseline; padding: 7px 0; color: #555; transition: color .2s; }
+  .steps li i { font-style: normal; width: 16px; text-align: center; }
+  .steps li.now { color: var(--fg); }
+  .steps li.now i::before { content: "●"; color: var(--accent); animation: blink 1s infinite; }
+  .steps li.done { color: var(--dim); }
+  .steps li.done i::before { content: "✓"; color: #4cd964; }
+  .steps li:not(.now):not(.done) i::before { content: "○"; }
+  .steps small { margin-left: auto; color: #555; font-size: 12px; }
+  @keyframes blink { 50% { opacity: .3; } }
+  .elapsed { margin-top: 14px; color: var(--dim); font-variant-numeric: tabular-nums; }
+  .foot { padding: 14px 16px; border-top: 1px solid var(--line); display: flex; gap: 10px; }
+  .foot .primary { margin: 0; }
+  .foot a { display: none; flex: none; color: var(--fg); border: 1px solid var(--line); border-radius: 10px; padding: 11px 14px; text-decoration: none; font-weight: 600; }
+  .done-state .foot a { display: block; }
+  @media (max-width: 720px) {
+    .sheet { flex-direction: column; max-height: none; height: calc(100vh - 32px); }
+    .stage { width: 100%; height: auto; flex: 1; aspect-ratio: auto; min-height: 0; }
+    .side { flex: none; border-left: 0; border-top: 1px solid var(--line); }
+    .side .body { padding: 12px 16px; }
+    .side .sub, .elapsed { display: none; }
+    .steps li { padding: 3px 0; }
+  }
+</style>
+</head>
+<body>
+
+<section id="landing">
+  <div class="card">
+    <h1 class="brand">MOMENTO</h1>
+    <p>Every photo has a moment. See the moment yours were taken.</p>
+    <form id="find">
+      <label class="field"><span>@</span><input id="name" placeholder="Instagram name" autocomplete="off" autocapitalize="off" spellcheck="false" required></label>
+      <button class="primary" id="go">Open profile</button>
+    </form>
+    <div class="error" id="landing-error"></div>
+    <div class="hint">Public profiles only · try <a href="#kristopolous">@kristopolous</a></div>
+  </div>
+</section>
+
+<section id="profile">
+  <div class="top"><span class="brand">MOMENTO</span><button id="back">Change profile</button></div>
+  <header class="me">
+    <div class="ring"><img id="picture" alt=""></div>
+    <div>
+      <h2 id="handle"></h2>
+      <div class="stats"><b id="count"></b> posts</div>
+      <div class="bio">Tap a photo to see <b>the moment it was taken</b>.</div>
+    </div>
+  </header>
+  <div class="tabs"><div>▦ POSTS</div></div>
+  <div class="grid" id="grid"></div>
+</section>
+
+<section id="moment">
+  <div class="sheet">
+    <div class="stage"><img id="still" alt=""><video id="video" playsinline loop></video><div class="scan"></div></div>
+    <div class="side">
+      <div class="who"><img id="mini" alt=""><span id="mini-name"></span><button id="close" aria-label="Close">×</button></div>
+      <div class="body">
+        <h3 id="title">The moment</h3>
+        <p class="sub" id="sub">How this photo was taken: a bystander's view, built from the post itself.</p>
+        <ul class="steps" id="steps">
+          <li data-step="plan"><i></i>Planning the moment<small>Gemini 3.1 Pro</small></li>
+          <li data-step="frame"><i></i>Building the scene<small>FLUX 3 Klein</small></li>
+          <li data-step="film"><i></i>Filming it, with sound<small>LTX-2.5</small></li>
+          <li data-step="score"><i></i>Scoring it<small>MiniMax Music 3</small></li>
+          <li data-step="cut"><i></i>Developing<small>Momento</small></li>
+        </ul>
+        <div class="elapsed" id="elapsed"></div>
+        <div class="error" id="moment-error"></div>
+      </div>
+      <div class="foot"><button class="primary" id="make">Make the moment</button><a id="save" download>Save</a></div>
+    </div>
+  </div>
+</section>
+
+<script>
+const $ = (id) => document.getElementById(id);
+// everything is relative to the folder this page is served from, with or without a trailing slash
+const ROOT = location.pathname.replace(/momento\/*$/i, "");
+const api = (path) => ROOT + path;
+async function json(res) {
+  const text = await res.text();
+  try { return JSON.parse(text); }
+  catch { throw new Error(res.status >= 500 || !res.ok ? "The server is restarting. Try again in a few seconds." : "Unexpected reply from the server."); }
+}
+let profile = null, current = null, timer = null, poll = null;
+
+// node class -> step, in graph order
+const STEP = {
+  LoadImage: "plan", ImageStitch: "plan", GeminiNode: "plan", CLIPLoader: "plan", MomentoPlan: "plan",
+  VAELoader: "frame", UNETLoader: "frame", ModelSamplingFlux: "frame", ReferenceMultiLatent: "frame",
+  EmptyFlux2LatentImage: "frame", KSampler: "frame",
+  VAEDecode: "film", EmptyLTXVLatentVideo: "film", LTXVImgToVideoInplace: "film", LTXVEmptyLatentAudio: "film",
+  LTXVConcatAVLatent: "film", LTXVConditioning: "film", RandomNoise: "film", CFGGuider: "film", KSamplerSelect: "film",
+  ManualSigmas: "film", SamplerCustomAdvanced: "film", LTXVSeparateAVLatent: "film", LTXVAudioVAEDecode: "film",
+  CreateVideo: "film",
+  ComfyCloudMiniMaxMusic3TextToAudioNode: "score",
+  MomentoReveal: "cut", SaveVideo: "cut",
+};
+const ORDER = ["plan", "frame", "film", "score", "cut"];
+
+function show(view) {
+  $("landing").style.display = view === "landing" ? "grid" : "none";
+  $("profile").style.display = view === "profile" ? "block" : "none";
+}
+
+async function openProfile(name) {
+  name = name.trim().replace(/^@/, "").toLowerCase();
+  if (!name) return;
+  $("landing-error").textContent = "";
+  $("go").disabled = true;
+  $("go").textContent = `Opening @${name}…`;
+  try {
+    const r = await fetch(api(`momento/profile/${encodeURIComponent(name)}`));
+    const p = await json(r);
+    p.picture = api(p.picture); p.posts = p.posts.map(api);
+    if (!p.found) throw new Error(`Couldn't open @${name}. Is the profile public?`);
+    profile = p;
+    $("picture").src = $("mini").src = p.picture;
+    $("handle").textContent = $("mini-name").textContent = p.name;
+    $("count").textContent = p.posts.length;
+    $("grid").replaceChildren(...p.posts.map((src, i) => {
+      const b = document.createElement("button");
+      const img = new Image();
+      img.src = src; img.alt = `Post ${i + 1}`; img.loading = "lazy";
+      b.append(img);
+      b.onclick = () => openPost(i);
+      return b;
+    }));
+    history.replaceState(null, "", `#${p.name}`);
+    show("profile");
+  } catch (e) {
+    $("landing-error").textContent = e.message;
+    show("landing");
+  } finally {
+    $("go").disabled = false;
+    $("go").textContent = "Open profile";
+  }
+}
+
+function setStep(step, done = false) {
+  const at = step ? ORDER.indexOf(step) : -1;
+  for (const li of $("steps").children) {
+    const k = ORDER.indexOf(li.dataset.step);
+    li.className = done || k < at ? "done" : k === at ? "now" : "";
+  }
+}
+
+function reset() {
+  clearInterval(timer); clearInterval(poll);
+  const v = $("video");
+  v.pause(); v.removeAttribute("src"); v.load(); v.style.display = "none";
+  $("still").style.display = "block";
+  $("moment").querySelector(".sheet").classList.remove("working", "done-state");
+  $("moment-error").textContent = $("elapsed").textContent = "";
+  $("make").disabled = false; $("make").textContent = "Make the moment"; $("make").style.display = "";
+  $("title").textContent = "The moment";
+  setStep(null);
+}
+
+function openPost(i) {
+  current = i;
+  reset();
+  $("still").src = profile.posts[i];
+  $("moment").classList.add("open");
+}
+
+async function make() {
+  const sheet = $("moment").querySelector(".sheet");
+  $("make").disabled = true; $("make").textContent = "Making the moment…";
+  $("moment-error").textContent = "";
+  const form = new FormData();
+  form.append("name", profile.name); form.append("post", current);
+  let id;
+  try {
+    const r = await fetch(api("momento/run"), { method: "POST", body: form });
+    const res = await json(r);
+    if (!r.ok) throw new Error(res.error || "Couldn't start.");
+    id = res.id;
+  } catch (e) {
+    $("moment-error").textContent = e.message;
+    $("make").disabled = false; $("make").textContent = "Try again";
+    return;
+  }
+  sheet.classList.add("working");
+  setStep("plan");
+  const t0 = Date.now();
+  timer = setInterval(() => {
+    const s = Math.round((Date.now() - t0) / 1000);
+    $("elapsed").textContent = `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")} · usually about 3 minutes`;
+  }, 1000);
+  let last = "plan";
+  poll = setInterval(async () => {
+    let st;
+    try { st = await json(await fetch(api(`momento/status/${id}`))); } catch { return; }
+    if (st.state === "queued") { $("title").textContent = "Waiting for the camera…"; return; }
+    if (st.state === "running") {
+      $("title").textContent = "The moment";
+      const step = STEP[st.node];
+      if (step && ORDER.indexOf(step) >= ORDER.indexOf(last)) { last = step; setStep(step); }
+      return;
+    }
+    clearInterval(poll); clearInterval(timer);
+    sheet.classList.remove("working");
+    if (st.state === "error") {
+      $("moment-error").textContent = st.error;
+      $("make").disabled = false; $("make").textContent = "Try again";
+      return;
+    }
+    setStep(null, true);
+    $("title").textContent = "The moment it was taken";
+    sheet.classList.add("done-state");
+    $("make").style.display = "none";
+    $("save").href = api(st.video);
+    const v = $("video");
+    v.src = api(st.video);
+    v.style.display = "block"; $("still").style.display = "none";
+    v.play().catch(() => { v.controls = true; });
+  }, 1500);
+}
+
+$("find").onsubmit = (e) => { e.preventDefault(); openProfile($("name").value); };
+$("back").onclick = () => { history.replaceState(null, "", location.pathname); show("landing"); $("name").focus(); };
+$("close").onclick = () => { reset(); $("moment").classList.remove("open"); };
+$("moment").onclick = (e) => { if (e.target.id === "moment") $("close").onclick(); };
+$("make").onclick = make;
+document.querySelector(".hint a").onclick = (e) => { e.preventDefault(); $("name").value = "kristopolous"; openProfile("kristopolous"); };
+addEventListener("keydown", (e) => { if (e.key === "Escape" && $("moment").classList.contains("open")) $("close").onclick(); });
+
+if (location.hash.length > 1) { $("name").value = location.hash.slice(1); openProfile(location.hash.slice(1)); }
+else { show("landing"); $("name").focus(); }
+</script>
+</body>
+</html>
