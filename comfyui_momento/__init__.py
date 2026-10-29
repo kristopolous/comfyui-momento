@@ -14,7 +14,7 @@ from typing_extensions import override
 
 from comfy_api.latest import ComfyExtension, InputImpl, Types, io, ui
 
-from .director import DIRECTOR, QUIET, VIDEO_NEGATIVE  # noqa: F401
+from .director import MUSIC, QUIET, VIDEO_NEGATIVE
 
 WEB_DIRECTORY = "./web"
 
@@ -57,16 +57,18 @@ class MomentoPlan(io.ComfyNode):
                 io.Clip.Input("video_clip", tooltip="LTX-2.5's text encoder."),
             ],
             outputs=[io.Conditioning.Output(display_name="still"), io.Conditioning.Output(display_name="still_negative"),
-                     io.Conditioning.Output(display_name="video"), io.Conditioning.Output(display_name="video_negative")],
+                     io.Conditioning.Output(display_name="video"), io.Conditioning.Output(display_name="video_negative"),
+                     io.String.Output(display_name="music")],
         )
 
     @classmethod
     def execute(cls, plan, image_clip, video_clip) -> io.NodeOutput:
         p = _plan(plan)
         video = p["video"] + QUIET
+        music = p.get("music") or MUSIC
         return io.NodeOutput(_encode(image_clip, p["still"]), _encode(image_clip, ""),
-                             _encode(video_clip, video), _encode(video_clip, VIDEO_NEGATIVE),
-                             ui=ui.PreviewText(f"THE SHOT\n{p['still']}\n\nTHE MOMENT\n{video}"))
+                             _encode(video_clip, video), _encode(video_clip, VIDEO_NEGATIVE), music,
+                             ui=ui.PreviewText(f"THE SHOT\n{p['still']}\n\nTHE MOMENT\n{video}\n\nTHE MUSIC\n{music}"))
 
 
 class MomentoReveal(io.ComfyNode):
@@ -134,10 +136,34 @@ def _mix(base, music, level, seconds, fade=0.8):
     return {"waveform": torch.clamp(b + m.to(b.device), -1, 1), "sample_rate": rate}
 
 
+class MomentoFit(io.ComfyNode):
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="MomentoFit",
+            display_name="Momento Fit",
+            category="momento",
+            description="Scale and center-crop an image to fill width x height: the post as the phone's view, for the "
+                        "video's last keyframe.",
+            inputs=[io.Image.Input("image"), io.Int.Input("width", default=288, min=32, max=4096),
+                    io.Int.Input("height", default=512, min=32, max=4096)],
+            outputs=[io.Image.Output(display_name="image")],
+        )
+
+    @classmethod
+    def execute(cls, image, width, height) -> io.NodeOutput:
+        img = image[:1].movedim(-1, 1)
+        scale = max(width / img.shape[3], height / img.shape[2])
+        nh, nw = max(height, round(img.shape[2] * scale)), max(width, round(img.shape[3] * scale))
+        img = F.interpolate(img, size=(nh, nw), mode="bicubic", align_corners=False).clamp(0, 1)
+        y, x = (nh - height) // 2, (nw - width) // 2
+        return io.NodeOutput(img[:, :, y:y + height, x:x + width].movedim(1, -1))
+
+
 class MomentoExtension(ComfyExtension):
     @override
     async def get_node_list(self) -> list[type[io.ComfyNode]]:
-        return [MomentoPlan, MomentoReveal]
+        return [MomentoPlan, MomentoReveal, MomentoFit]
 
 
 async def comfy_entrypoint() -> MomentoExtension:

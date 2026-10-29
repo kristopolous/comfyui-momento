@@ -44,7 +44,7 @@
     "3",
     0
    ],
-   "system_prompt": "Left image: someone's profile picture. Right image: a photo they posted.\nDescribe the real moment that photo was taken, as a NEW camera angle on the same place: a bystander's view from\nbehind and to the side of the photographer, a few meters back. Everything the post shows (the subject, the buildings,\nthe objects, the light, the weather) is still there, now seen from this new position, along with the surroundings\nthe post cropped out. The photographer is the person in the profile picture (if it doesn't show a person, an\nanthropomorphic rabbit in everyday clothes), holding a phone up, aimed at the subject of the post; the phone's screen\nis visible and shows the shot being framed. Realistic, unhurried, flattering: it captures a nice moment. No jokes, no\nmishaps, no dialogue. Reply with JSON only:\n{\"still\": \"<instruction for an image generator: one vertical frame of exactly that bystander view. Name every element\n   of the post and where it sits in this new view, then the photographer and the phone. The person is <person_1> from\n   ref_image_1 (same face, hair, build, clothes). This is a different camera position from ref_image_0, not a copy.>\",\n \"video\": \"<prompt for an image-to-video model, 4 seconds, no speech: the photographer steps into position, raises\n   the phone, frames, and taps the shutter; the screen flashes. Handheld bystander camera. Sound: the ambient\n   sound of the place, and a crisp camera lens shutter sound at the moment the photo is taken. Nobody talks.>\"}"
+   "system_prompt": "Left image: someone's profile picture. Right image: a photo they posted.\nDescribe the real moment that photo was taken, as a NEW camera angle on the same place: a bystander's view from behind and to the side of the photographer, a few meters back, with the phone's screen visible showing the shot being framed. Everything the post\nshows (the subject, the buildings, the objects, the light, the weather, the time of day) is still there, now seen from\nthis new position, along with the surroundings the post cropped out. The photographer is the person in the profile\npicture (if it doesn't show a person, an anthropomorphic rabbit in everyday clothes), holding a phone up, aimed at the\nsubject of the post. Keep the person exactly as the profile picture shows them: same face, hair and build; don't add\njewelry, earrings, glasses, hats or accessories the profile picture doesn't show. Realistic, unhurried, flattering: it\ncaptures a nice moment. No jokes, no mishaps, no dialogue. Reply with JSON only:\n{\"still\": \"<instruction for an image generator: one vertical frame of exactly that view. Name every element of the\n   post and where it sits in this new view, then the photographer and the phone. The person is <person_1> from\n   ref_image_1. This is a different camera position from ref_image_0, not a copy.>\",\n \"video\": \"<prompt for an image-to-video model, 4 seconds, no speech: the photographer steps into position, raises the phone and frames the shot while the handheld camera moves in over their shoulder, ending on exactly what the phone sees, the moment the shutter is tapped. Sound: the ambient sound of the place,\n   and a crisp camera lens shutter sound at the moment the photo is taken. Nobody talks.>\",\n \"music\": \"<a prompt for an instrumental music generator that fits THIS post's place, time and mood, from what you see:\n   genre, instruments, tempo and feeling in one or two sentences (a punk show at night gets fast distorted punk; a\n   quiet park at dawn gets something gentle; a city street gets the sound of that city).>\"}"
   },
   "_meta": {
    "title": "Director (Gemini)"
@@ -237,19 +237,6 @@
   }
  },
  "20": {
-  "class_type": "LTXVConcatAVLatent",
-  "inputs": {
-   "video_latent": [
-    "18",
-    0
-   ],
-   "audio_latent": [
-    "19",
-    0
-   ]
-  }
- },
- "21": {
   "class_type": "LTXVConditioning",
   "inputs": {
    "positive": [
@@ -263,89 +250,157 @@
    "frame_rate": 24.0
   }
  },
+ "21": {
+  "class_type": "MomentoFit",
+  "inputs": {
+   "image": [
+    "2",
+    0
+   ],
+   "width": 288,
+   "height": 512
+  }
+ },
  "22": {
+  "class_type": "LTXVAddGuide",
+  "inputs": {
+   "positive": [
+    "20",
+    0
+   ],
+   "negative": [
+    "20",
+    1
+   ],
+   "vae": [
+    "15",
+    0
+   ],
+   "latent": [
+    "18",
+    0
+   ],
+   "image": [
+    "21",
+    0
+   ],
+   "frame_idx": -1,
+   "strength": 0.9
+  }
+ },
+ "23": {
+  "class_type": "LTXVConcatAVLatent",
+  "inputs": {
+   "video_latent": [
+    "22",
+    2
+   ],
+   "audio_latent": [
+    "19",
+    0
+   ]
+  }
+ },
+ "24": {
   "class_type": "UNETLoader",
   "inputs": {
    "unet_name": "ltx-2.5-22b-distilled-transformer-comfy-int8-convrot.safetensors",
    "weight_dtype": "default"
   }
  },
- "23": {
+ "25": {
   "class_type": "RandomNoise",
   "inputs": {
    "noise_seed": 1
   }
  },
- "24": {
+ "26": {
   "class_type": "CFGGuider",
   "inputs": {
    "model": [
-    "22",
+    "24",
     0
    ],
    "positive": [
-    "21",
+    "22",
     0
    ],
    "negative": [
-    "21",
+    "22",
     1
    ],
    "cfg": 1.0
   }
  },
- "25": {
+ "27": {
   "class_type": "KSamplerSelect",
   "inputs": {
    "sampler_name": "euler_ancestral"
   }
  },
- "26": {
+ "28": {
   "class_type": "ManualSigmas",
   "inputs": {
    "sigmas": "1.0, 0.99375, 0.9875, 0.98125, 0.975, 0.909375, 0.725, 0.421875, 0.0"
   }
  },
- "27": {
+ "29": {
   "class_type": "SamplerCustomAdvanced",
   "inputs": {
    "noise": [
-    "23",
-    0
-   ],
-   "guider": [
-    "24",
-    0
-   ],
-   "sampler": [
     "25",
     0
    ],
-   "sigmas": [
+   "guider": [
     "26",
     0
    ],
+   "sampler": [
+    "27",
+    0
+   ],
+   "sigmas": [
+    "28",
+    0
+   ],
    "latent_image": [
-    "20",
+    "23",
     0
    ]
   }
  },
- "28": {
+ "30": {
   "class_type": "LTXVSeparateAVLatent",
   "inputs": {
    "av_latent": [
-    "27",
+    "29",
     0
    ]
   }
  },
- "29": {
+ "31": {
+  "class_type": "LTXVCropGuides",
+  "inputs": {
+   "positive": [
+    "22",
+    0
+   ],
+   "negative": [
+    "22",
+    1
+   ],
+   "latent": [
+    "30",
+    0
+   ]
+  }
+ },
+ "32": {
   "class_type": "VAEDecode",
   "inputs": {
    "samples": [
-    "28",
-    0
+    "31",
+    2
    ],
    "vae": [
     "15",
@@ -353,11 +408,11 @@
    ]
   }
  },
- "30": {
+ "33": {
   "class_type": "LTXVAudioVAEDecode",
   "inputs": {
    "samples": [
-    "28",
+    "30",
     1
    ],
    "audio_vae": [
@@ -366,24 +421,27 @@
    ]
   }
  },
- "31": {
+ "34": {
   "class_type": "CreateVideo",
   "inputs": {
    "images": [
-    "29",
+    "32",
     0
    ],
    "audio": [
-    "30",
+    "33",
     0
    ],
    "fps": 24.0
   }
  },
- "32": {
+ "35": {
   "class_type": "ComfyCloudMiniMaxMusic3TextToAudioNode",
   "inputs": {
-   "prompt": "Soft mellow lounge jazz, instrumental: warm Rhodes piano, upright bass, brushed drums, a gentle muted trumpet. Relaxed, nostalgic, unhurried, like a quiet afternoon.",
+   "prompt": [
+    "7",
+    4
+   ],
    "lyrics": "",
    "seed": 1,
    "max_duration": 10.0,
@@ -393,11 +451,11 @@
    "title": "Soundtrack (MiniMax Music 3)"
   }
  },
- "33": {
+ "36": {
   "class_type": "MomentoReveal",
   "inputs": {
    "moment": [
-    "31",
+    "34",
     0
    ],
    "post": [
@@ -407,17 +465,17 @@
    "hold": 1.8,
    "flash": 0.25,
    "music": [
-    "32",
+    "35",
     0
    ],
    "music_level": 0.35
   }
  },
- "34": {
+ "37": {
   "class_type": "SaveVideo",
   "inputs": {
    "video": [
-    "33",
+    "36",
     0
    ],
    "filename_prefix": "momento/moment",

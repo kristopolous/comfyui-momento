@@ -4,6 +4,7 @@ Momento output on a 16:9 stage, a how-it-works card, an end card.
     python scripts/demo.py out/demo.mp4 --profile shot.png out/post04.mp4:1,0 out/post02.mp4:0,1 ...
 Each input is a Momento output; ":row,col" is where its post sits in the profile screenshot's grid.
 """
+import json
 import subprocess
 import sys
 import tempfile
@@ -184,11 +185,15 @@ def main(out, clips, shot=None, ui=None):
     staged = []
     for i, c in enumerate(clips):
         c, _, where = c.partition(":")
+        where, _, own = where.partition(":")  # clip.mp4:row,col[:profile_screenshot.png]
         seg = []
-        if shot and where:
+        if (own or shot) and where:
             row, col = (int(v) for v in where.split(","))
-            ants_clip(shot, (row, col), 2.4, str(tmp / f"pick{i}.mp4"), caption="The profile picture",
-                      sub="+ this post")
+            side = Path(own or shot).with_suffix(".json")
+            name = json.loads(side.read_text()).get("name") if side.exists() else None
+            ants_clip(own or shot, (row, col), 2.4, str(tmp / f"pick{i}.mp4"),
+                      caption=f"@{name}" if name else "The profile picture",
+                      sub="profile picture + this post" if name else "+ this post")
             seg.append(tmp / f"pick{i}.mp4")
         stage(c, str(tmp / f"clip{i}.mp4"))
         staged.append(seg + [tmp / f"clip{i}.mp4"])

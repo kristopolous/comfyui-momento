@@ -5,9 +5,9 @@
 import math
 
 try:
-    from .director import DIRECTOR, MUSIC
+    from .director import director as plan_prompt
 except ImportError:  # imported as a plain module by scripts/
-    from director import DIRECTOR, MUSIC
+    from director import director as plan_prompt
 
 KLEIN = "flux3-image-klein-int8-convrot.safetensors"
 KLEIN_TE = "qwen3vl_4b_int8_convrot.safetensors"
@@ -27,14 +27,16 @@ class Graph(dict):
 
 
 def momento(profile="profile.png", post="post.png", width=288, height=512, frames=97, fps=24, seed=1,
-                    director=DIRECTOR, prefix="momento/moment"):
+            angle="behind", prefix="momento/moment"):
+    """angle: "behind" (over the shoulder, ending on the post itself as the last keyframe) or "face" (from the side,
+    the photographer's face in view)."""
     g = Graph()
     who = g.add("LoadImage", "Profile picture", image=profile)
     shot = g.add("LoadImage", "The post", image=post)
     both = g.add("ImageStitch", image1=who(0), image2=shot(0), direction="right", match_image_size=True,
                  spacing_width=0, spacing_color="white")
     gemini = g.add("GeminiNode", "Director (Gemini)", prompt="Plan the moment this post was taken.",
-                   model="gemini-3-1-pro", seed=seed, images=both(0), system_prompt=director)
+                   model="gemini-3-1-pro", seed=seed, images=both(0), system_prompt=plan_prompt(angle))
 
     kclip = g.add("CLIPLoader", clip_name=KLEIN_TE, type="flux3", device="default")
     lclip = g.add("CLIPLoader", clip_name=LTX_TE, type="ltxv", device="default")
@@ -58,17 +60,27 @@ def momento(profile="profile.png", post="post.png", width=288, height=512, frame
     lat = g.add("LTXVImgToVideoInplace", vae=vae(), image=frame(), strength=1.0, bypass=False,
                 latent=g.add("EmptyLTXVLatentVideo", width=width, height=height, length=frames, batch_size=1)())
     audio = g.add("LTXVEmptyLatentAudio", frames_number=frames, frame_rate=fps, batch_size=1, audio_vae=avae())
-    av = g.add("LTXVConcatAVLatent", video_latent=lat(), audio_latent=audio())
     cond = g.add("LTXVConditioning", positive=plan(2), negative=plan(3), frame_rate=float(fps))
+    pos, neg, video_latent = cond(0), cond(1), lat()
+    if angle == "behind":
+        # last keyframe: the post itself, so the camera ends on exactly what the phone sees
+        view = g.add("MomentoFit", image=shot(0), width=width, height=height)
+        guide = g.add("LTXVAddGuide", positive=pos, negative=neg, vae=vae(), latent=video_latent, image=view(),
+                      frame_idx=-1, strength=0.9)
+        pos, neg, video_latent = guide(0), guide(1), guide(2)
+    av = g.add("LTXVConcatAVLatent", video_latent=video_latent, audio_latent=audio())
     lmodel = g.add("UNETLoader", unet_name=LTX, weight_dtype="default")
     out = g.add("SamplerCustomAdvanced", noise=g.add("RandomNoise", noise_seed=seed)(),
-                guider=g.add("CFGGuider", model=lmodel(), positive=cond(0), negative=cond(1), cfg=1.0)(),
+                guider=g.add("CFGGuider", model=lmodel(), positive=pos, negative=neg, cfg=1.0)(),
                 sampler=g.add("KSamplerSelect", sampler_name="euler_ancestral")(),
                 sigmas=g.add("ManualSigmas", sigmas=LTX_SIGMAS)(), latent_image=av())
     sep = g.add("LTXVSeparateAVLatent", av_latent=out(0))
-    moment = g.add("CreateVideo", images=g.add("VAEDecode", samples=sep(0), vae=vae())(),
+    video_out = sep(0)
+    if angle == "behind":  # drop the keyframe's extra latent before decoding
+        video_out = g.add("LTXVCropGuides", positive=pos, negative=neg, latent=video_out)(2)
+    moment = g.add("CreateVideo", images=g.add("VAEDecode", samples=video_out, vae=vae())(),
                    audio=g.add("LTXVAudioVAEDecode", samples=sep(1), audio_vae=avae())(), fps=float(fps))
-    music = g.add("ComfyCloudMiniMaxMusic3TextToAudioNode", "Soundtrack (MiniMax Music 3)", prompt=MUSIC, lyrics="",
+    music = g.add("ComfyCloudMiniMaxMusic3TextToAudioNode", "Soundtrack (MiniMax Music 3)", prompt=plan(4), lyrics="",
                   seed=seed, max_duration=10.0, audio_quality="128k")
     final = g.add("MomentoReveal", moment=moment(), post=shot(0), hold=1.8, flash=0.25, music=music(0),
                   music_level=0.35)

@@ -1,16 +1,20 @@
 # Momento
 
-**Give it a profile picture and a photo someone posted. Get back a video of the moment they took it.**
+**Type an Instagram name. Tap a post. Watch the moment the photo was taken.**
 
-Momento rebuilds the scene from a bystander's point of view. Everything in the post is still there, now seen from a
-few meters behind the photographer, along with whatever the post cropped out. The person from the profile picture
-raises their phone, frames the shot and takes it. Soft jazz from MiniMax Music 3 plays under the sounds of the place, and a lens shutter
-clicks as the photo is taken. Then the video cuts to the real post.
+Live: **https://9ol.es/momento-demo/** · Demo video: **https://9ol.es/momento-video**
 
-If the profile picture doesn't show a person, an anthropomorphic rabbit takes the photo instead.
+Momento opens a public Instagram profile and shows its 12 most recent posts as a grid. Tap one and it films the
+moment that photo was taken, from a bystander's point of view. The person from the profile picture is there with
+their phone up, in the same place, under the same light, with whatever the post cropped out. Then the video arrives
+at the post itself. The soundtrack is written for each photo: a punk show at night gets punk, a quiet park gets
+something gentle.
 
-Built for Comfy's **Open Source Higgsfield** build night. It's one ComfyUI graph, it runs as an App, and it uses the
-Comfy API for the model that plans the shot and the one that writes the music.
+Every run is different: a new seed, and a camera that is either over the photographer's shoulder or out in front
+where you can see their face. If the profile picture doesn't show a person, an anthropomorphic rabbit takes the photo.
+
+Built for Comfy's **Open Source Higgsfield** build night. It's one ComfyUI graph. It runs as a Comfy App and behind
+its own page on the same ComfyUI server, and it uses the Comfy API for the two models that aren't open weights.
 
 ## How it works
 
@@ -20,17 +24,19 @@ profile picture ─┐
 the post ────────┘   the bystander's view of the scene, and the motion and sound of the shot being taken
                           │
                           ▼
-                 Momento Plan: encodes the plan for both models
+                 Momento Plan: encodes the plan for both models, and passes Gemini's music prompt on
                           │
        ┌──────────────────┴──────────────────┐
        ▼                                     ▼
  FLUX 3 Klein builds the first frame    LTX-2.5 animates it with native audio:
  from the post's objects (ref 0) and    the person takes the shot; ambient sound
- the person (ref 1), from a new     ──▶ and a lens shutter. No speech.
- camera position                             │
+ the person (ref 1), from a new     ──▶ and a lens shutter, no speech. Over the
+ camera position                        shoulder, the post is the LAST keyframe,
+                                        so the camera ends on what the phone sees
+                                             │
                                              ▼
- MiniMax Music 3 (Comfy Cloud) ────▶ Momento Reveal: mixes the soft jazz under the moment,
- writes the soft jazz                white shutter flash, then the real post
+ MiniMax Music 3 (Comfy Cloud) ────▶ Momento Reveal: mixes the soundtrack under the moment,
+ scores it from Gemini's prompt      white shutter flash, then the real post
 ```
 
 By default everything runs at the lowest resolution: 288×512 vertical, 4 seconds. That takes about 2.5 minutes on an
@@ -69,13 +75,17 @@ wget -P vae              $L/vae/ltx-2.5-audio-vae-bf16.safetensors
 
 ## Run
 
-**In ComfyUI:** open `workflows/momento_api.json`, upload a profile picture to "Profile picture" and a photo to
-"The post", and press Run. The output is saved to `output/momento/`.
+**The page:** with the node pack installed, open `http://<comfy-host>:8188/momento`. Type an Instagram name; the
+server opens the public profile in headless Chromium (Instagram doesn't answer plain server requests), saves the
+profile picture and posts, and shows the grid. Runs use the server's Comfy API key: set `COMFY_API_KEY`, or put it in
+a `.env` file next to the ComfyUI folder. It needs `chromium` or `google-chrome` on the server.
+
+**In ComfyUI:** open `workflows/momento.json` (App Mode), pick a profile picture and a photo, and press Run. The output is saved to `output/momento/`.
 
 **From a script:**
 
 ```bash
-COMFY_URL=http://<gpu-host>:8188 COMFY_API_KEY=comfyui-... python scripts/run.py profile.jpg post1.jpg post2.jpg
+COMFY_URL=http://<gpu-host>:8188 COMFY_API_KEY=comfyui-... python scripts/run.py [--angle behind|face] profile.jpg post1.jpg post2.jpg
 ```
 
 To rebuild the graph, run `python scripts/graph.py > workflows/momento_api.json`.

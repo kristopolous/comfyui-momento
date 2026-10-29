@@ -13,6 +13,7 @@ import asyncio
 import html.parser
 import json
 import os
+import random
 import re
 import shutil
 import uuid
@@ -164,7 +165,9 @@ async def run(request):
         return web.json_response({"error": "No such post."}, status=400)
     post = posts[i]
     rel = lambda p: Path(p).relative_to(folder_paths.get_input_directory()).as_posix()  # noqa: E731
-    graph = momento(rel(picture), rel(post), prefix=f"momento/{job}")
+    # part of the fun is that every run is different: a new seed, and either camera angle
+    graph = momento(rel(picture), rel(post), seed=random.randrange(2**31), angle=random.choice(["behind", "face"]),
+                    prefix=f"momento/{job}")
     # a client_id makes ComfyUI track the running node (last_node_id), which /momento/status reports
     body = {"prompt": graph, "client_id": f"momento-{job}", "extra_data": {"api_key_comfy_org": key}}
     async with aiohttp.ClientSession() as s:

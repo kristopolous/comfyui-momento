@@ -13,6 +13,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 import comfy  # noqa: E402
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "comfyui_momento"))  # the pack's graph.py, not this folder's
 from graph import momento  # noqa: E402
 
 
@@ -30,7 +31,7 @@ def key():
 def submit(profile, post, out):
     name = Path(post).stem
     g = momento(comfy.upload(profile, f"momento_profile_{Path(profile).stem}.png"),
-                        comfy.upload(post, f"momento_{name}.png"), prefix=f"momento/{name}")
+                        comfy.upload(post, f"momento_{name}.png"), angle=ANGLE, prefix=f"momento/{name}_{ANGLE}")
     body = json.dumps({"prompt": g, "client_id": comfy.CLIENT_ID, "extra_data": {"api_key_comfy_org": key()}}).encode()
     res = json.loads(comfy._req("/prompt", body, {"Content-Type": "application/json"}))
     if res.get("node_errors"):
@@ -45,13 +46,19 @@ def submit(profile, post, out):
             print(f"[{name}] {text}\n", flush=True)
         for f in node.get("images", []) + node.get("videos", []):
             q = urllib.parse.urlencode({k: f[k] for k in ("filename", "subfolder", "type")})
-            dest = Path(out) / f"{name}.mp4"
+            dest = Path(out) / f"{name}_{ANGLE}.mp4"
             dest.parent.mkdir(parents=True, exist_ok=True)
             dest.write_bytes(comfy._req(f"/view?{q}"))
             print(f"[{name}] {dest}  ({time.time() - t:.0f}s)", flush=True)
 
 
 if __name__ == "__main__":
-    profile, *posts = sys.argv[1:]
+    args = sys.argv[1:]
+    ANGLE = "behind"
+    if "--angle" in args:
+        i = args.index("--angle")
+        ANGLE = args[i + 1]
+        del args[i:i + 2]
+    profile, *posts = args
     with ThreadPoolExecutor(len(posts)) as pool:  # queued together; the server runs them one after another
         list(pool.map(lambda p: submit(profile, p, "out"), posts))
