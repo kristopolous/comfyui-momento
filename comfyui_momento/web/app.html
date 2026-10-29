@@ -215,11 +215,12 @@ async function openProfile(name) {
   }
 }
 
+let seen = new Set();
 function setStep(step, done = false) {
-  const at = step ? ORDER.indexOf(step) : -1;
+  if (step) seen.add(step);
   for (const li of $("steps").children) {
-    const k = ORDER.indexOf(li.dataset.step);
-    li.className = done || k < at ? "done" : k === at ? "now" : "";
+    const k = li.dataset.step;
+    li.className = done || (seen.has(k) && k !== step) ? "done" : k === step ? "now" : "";
   }
 }
 
@@ -232,6 +233,7 @@ function reset() {
   $("moment-error").textContent = $("elapsed").textContent = "";
   $("make").disabled = false; $("make").textContent = "Make the moment"; $("make").style.display = "";
   $("title").textContent = "The moment";
+  seen = new Set();
   setStep(null);
 }
 
@@ -260,13 +262,11 @@ async function make() {
     return;
   }
   sheet.classList.add("working");
-  setStep("plan");
   const t0 = Date.now();
   timer = setInterval(() => {
     const s = Math.round((Date.now() - t0) / 1000);
     $("elapsed").textContent = `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")} · usually about 3 minutes`;
   }, 1000);
-  let last = "plan";
   poll = setInterval(async () => {
     let st;
     try { st = await json(await fetch(api(`momento/status/${id}`))); } catch { return; }
@@ -274,7 +274,7 @@ async function make() {
     if (st.state === "running") {
       $("title").textContent = "The moment";
       const step = STEP[st.node];
-      if (step && ORDER.indexOf(step) >= ORDER.indexOf(last)) { last = step; setStep(step); }
+      if (step) setStep(step);
       return;
     }
     clearInterval(poll); clearInterval(timer);

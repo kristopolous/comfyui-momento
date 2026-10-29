@@ -125,13 +125,40 @@ def stage(clip, out):
        "-af", "aresample=48000,aformat=channel_layouts=stereo", "-c:v", "libx264", "-c:a", "aac", out)
 
 
-def main(out, clips, shot=None):
+def ui_segment(take, marks, out):
+    """A screen recording of the page: real speed until `fast`, fast-forward (with a badge) to `slow`, real speed to
+    `end`. marks = (fast, slow, end) in seconds."""
+    fast, slow, end = marks
+    tmp = Path(tempfile.mkdtemp())
+    fit = f"scale={W}:{H}:force_original_aspect_ratio=decrease,pad={W}:{H}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1,fps={FPS}"
+    badge = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    d = ImageDraw.Draw(badge)
+    label = f"▶▶  {round(slow - fast) // 60} min {round(slow - fast) % 60:02d} s, sped up"
+    f = font("Bold", 30)
+    tw = d.textlength(label, font=f)
+    d.rounded_rectangle((W - tw - 70, 30, W - 30, 86), 14, fill=(0, 0, 0, 200))
+    d.text((W - tw - 50, 41), label, font=f, fill=ACCENT)
+    badge.save(tmp / "badge.png")
+    speed = (slow - fast) / 6.0
+    ff("-ss", "0", "-to", str(fast), "-i", take, "-vf", fit, "-an", "-c:v", "libx264", str(tmp / "a.mp4"))
+    ff("-ss", str(fast), "-to", str(slow), "-i", take, "-i", str(tmp / "badge.png"), "-filter_complex",
+       f"[0:v]setpts=PTS/{speed},{fit}[v];[v][1:v]overlay=0:0", "-an", "-c:v", "libx264", str(tmp / "b.mp4"))
+    ff("-ss", str(slow), "-to", str(end), "-i", take, "-vf", fit, "-an", "-c:v", "libx264", str(tmp / "c.mp4"))
+    parts = [tmp / n for n in ("a.mp4", "b.mp4", "c.mp4")]
+    inputs = sum((["-i", str(p)] for p in parts), [])
+    seconds = fast + 6.0 + (end - slow)
+    ff(*inputs, "-f", "lavfi", "-t", str(seconds), "-i", "anullsrc=r=48000:cl=stereo", "-filter_complex",
+       "".join(f"[{i}:v]" for i in range(3)) + "concat=n=3:v=1:a=0[v]", "-map", "[v]", "-map", "3:a",
+       "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", "-shortest", out)
+
+
+def main(out, clips, shot=None, ui=None):
     tmp = Path(tempfile.mkdtemp())
     white, grey, dim = (245, 245, 245), (170, 170, 175), (110, 110, 118)
     card(tmp / "title.png", [("MOMENTO", "Black", 120, white, 18),
                              ("Every photo has a moment.", "Light", 34, grey, 0)])
-    card(tmp / "pitch.png", [("Give it a profile picture and a post.", "Medium", 40, white, 14),
-                             ("It shows you the moment the photo was taken.", "Light", 34, grey, 0)])
+    card(tmp / "pitch.png", [("Type an Instagram name. Tap a post.", "Medium", 40, white, 14),
+                             ("See the moment the photo was taken.", "Light", 34, grey, 0)])
     card(tmp / "how.png", [("ONE COMFYUI GRAPH", "Bold", 26, dim, 30),
                            ("Gemini 3.1 Pro plans the moment", "Medium", 36, white, 12),
                            ("FLUX 3 Klein builds the first frame", "Medium", 36, white, 12),
@@ -144,7 +171,12 @@ def main(out, clips, shot=None):
     for name, secs in (("title", 2.6), ("pitch", 3.0)):
         still_clip(str(tmp / f"{name}.png"), secs, str(tmp / f"{name}.mp4"))
         parts.append(tmp / f"{name}.mp4")
-    if shot:
+    if ui:
+        take, result, marks = ui
+        ui_segment(take, marks, str(tmp / "ui.mp4"))
+        stage(result, str(tmp / "ui_result.mp4"))
+        parts += [tmp / "ui.mp4", tmp / "ui_result.mp4"]
+    if shot and not ui:
         profile_card(tmp / "profile.png", shot, caption="A real Instagram profile.",
                      sub="One profile picture. A grid of posts.")
         still_clip(str(tmp / "profile.png"), 3.2, str(tmp / "profile.mp4"))
@@ -174,9 +206,13 @@ def main(out, clips, shot=None):
 
 if __name__ == "__main__":
     args = sys.argv[2:]
-    shot = None
+    shot = ui = None
     if "--profile" in args:
         i = args.index("--profile")
         shot = args[i + 1]
         del args[i:i + 2]
-    main(sys.argv[1], args, shot)
+    if "--ui" in args:  # --ui take.mp4 result.mp4 fast,slow,end
+        i = args.index("--ui")
+        ui = (args[i + 1], args[i + 2], tuple(float(v) for v in args[i + 3].split(",")))
+        del args[i:i + 4]
+    main(sys.argv[1], args, shot, ui)

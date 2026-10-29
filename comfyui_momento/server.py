@@ -116,18 +116,6 @@ def _url(path):
 
 routes = PromptServer.instance.routes
 
-# which node each run is on: ComfyUI sends "executing" {node, prompt_id} as it goes; keep the latest per run
-_executing = {}
-_send_sync = PromptServer.instance.send_sync
-
-
-def _track(event, data, sid=None):
-    if event == "executing" and isinstance(data, dict) and data.get("prompt_id"):
-        _executing[data["prompt_id"]] = data.get("node")
-    return _send_sync(event, data, sid)
-
-
-PromptServer.instance.send_sync = _track
 
 
 @routes.get("/momento")
@@ -177,7 +165,8 @@ async def run(request):
     post = posts[i]
     rel = lambda p: Path(p).relative_to(folder_paths.get_input_directory()).as_posix()  # noqa: E731
     graph = momento(rel(picture), rel(post), prefix=f"momento/{job}")
-    body = {"prompt": graph, "extra_data": {"api_key_comfy_org": key}}
+    # a client_id makes ComfyUI track the running node (last_node_id), which /momento/status reports
+    body = {"prompt": graph, "client_id": f"momento-{job}", "extra_data": {"api_key_comfy_org": key}}
     async with aiohttp.ClientSession() as s:
         async with s.post(f"http://127.0.0.1:{PromptServer.instance.port}/prompt", json=body) as r:
             res = await r.json()
@@ -197,7 +186,8 @@ async def status(request):
             async with s.get(f"http://127.0.0.1:{port}/queue") as r:
                 q = await r.json()
             running = next((item for item in q["queue_running"] if item[1] == pid), None)
-            node = _executing.get(pid) if running else None
+            srv = PromptServer.instance  # ComfyUI keeps the running prompt and node here
+            node = srv.last_node_id if running and getattr(srv, "last_prompt_id", None) == pid else None
             kind = running[2].get(str(node), {}).get("class_type") if running and node else None
             return web.json_response({"state": "running" if running else "queued", "node": kind})
     st = hist["status"]
