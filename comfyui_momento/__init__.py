@@ -75,12 +75,14 @@ class MomentoReveal(io.ComfyNode):
                 io.Image.Input("post"),
                 io.Float.Input("hold", default=1.8, min=0.5, max=6.0, step=0.1, tooltip="Seconds the post stays up."),
                 io.Float.Input("flash", default=0.25, min=0.0, max=1.0, step=0.05, tooltip="White flash fade, seconds."),
+                io.Audio.Input("music", optional=True, tooltip="Soundtrack, mixed under the moment's own sound."),
+                io.Float.Input("music_level", default=0.35, min=0.0, max=1.0, step=0.05, tooltip="Soundtrack volume."),
             ],
             outputs=[io.Video.Output(display_name="video")],
         )
 
     @classmethod
-    def execute(cls, moment, post, hold, flash) -> io.NodeOutput:
+    def execute(cls, moment, post, hold, flash, music=None, music_level=0.35) -> io.NodeOutput:
         c = moment.get_components()
         frames, fps = c.images, float(c.frame_rate)
         _, h, w, _ = frames.shape
@@ -99,8 +101,30 @@ class MomentoReveal(io.ComfyNode):
             wave, rate = audio["waveform"], audio["sample_rate"]
             pad = torch.zeros((*wave.shape[:-1], round(n / fps * rate)), dtype=wave.dtype, device=wave.device)
             audio = {"waveform": torch.cat([wave, pad], -1), "sample_rate": rate}
+        if music is not None:
+            audio = _mix(audio, music, music_level, (len(frames) + n) / fps)
         return io.NodeOutput(InputImpl.VideoFromComponents(
             Types.VideoComponents(images=torch.cat([frames, tail]), audio=audio, frame_rate=c.frame_rate)))
+
+
+def _mix(base, music, level, seconds, fade=0.8):
+    """Lay `music` under `base` (or alone), trimmed to `seconds` with a fade-out."""
+    import torchaudio
+    rate = base["sample_rate"] if base is not None else music["sample_rate"]
+    m = music["waveform"][:1].float()
+    if music["sample_rate"] != rate:
+        m = torchaudio.functional.resample(m, music["sample_rate"], rate)
+    length = round(seconds * rate)
+    m = F.pad(m, (0, max(0, length - m.shape[-1])))[..., :length]
+    ramp = torch.clamp(torch.arange(length, dtype=m.dtype) / (fade * rate), 0, 1).flip(0)
+    m = m * level * ramp
+    if base is None:
+        return {"waveform": m, "sample_rate": rate}
+    b = base["waveform"].float()
+    b = F.pad(b, (0, max(0, length - b.shape[-1])))[..., :length]
+    if m.shape[1] != b.shape[1]:
+        m = m.mean(1, keepdim=True).expand(-1, b.shape[1], -1)
+    return {"waveform": torch.clamp(b + m.to(b.device), -1, 1), "sample_rate": rate}
 
 
 class MomentoExtension(ComfyExtension):

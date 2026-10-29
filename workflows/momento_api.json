@@ -44,7 +44,7 @@
     "3",
     0
    ],
-   "system_prompt": "Left image: someone's profile picture. Right image: a photo they posted.\nDescribe the real moment that photo was taken, as a NEW camera angle on the same place: a bystander's view from\nbehind and to the side of the photographer, a few meters back. Everything the post shows (the subject, the buildings,\nthe objects, the light, the weather) is still there, now seen from this new position, along with the surroundings\nthe post cropped out. The photographer is the person in the profile picture (if it doesn't show a person, an\nanthropomorphic rabbit in everyday clothes), holding a phone up, aimed at the subject of the post; the phone's screen\nis visible and shows the shot being framed. Realistic, unhurried, flattering: it captures a nice moment. No jokes, no\nmishaps, no dialogue. Reply with JSON only:\n{\"still\": \"<instruction for an image generator: one vertical frame of exactly that bystander view. Name every element\n   of the post and where it sits in this new view, then the photographer and the phone. The person is <person_1> from\n   ref_image_1 (same face, hair, build, clothes). This is a different camera position from ref_image_0, not a copy.>\",\n \"video\": \"<prompt for an image-to-video model, 4 seconds, no speech: the photographer steps into position, raises\n   the phone, frames, and taps the shutter; the screen flashes. Handheld bystander camera. Sound: soft jazz playing\n   quietly under the ambient sound of the place, and a crisp camera lens shutter sound at the moment the photo is\n   taken. Nobody talks.>\"}"
+   "system_prompt": "Left image: someone's profile picture. Right image: a photo they posted.\nDescribe the real moment that photo was taken, as a NEW camera angle on the same place: a bystander's view from\nbehind and to the side of the photographer, a few meters back. Everything the post shows (the subject, the buildings,\nthe objects, the light, the weather) is still there, now seen from this new position, along with the surroundings\nthe post cropped out. The photographer is the person in the profile picture (if it doesn't show a person, an\nanthropomorphic rabbit in everyday clothes), holding a phone up, aimed at the subject of the post; the phone's screen\nis visible and shows the shot being framed. Realistic, unhurried, flattering: it captures a nice moment. No jokes, no\nmishaps, no dialogue. Reply with JSON only:\n{\"still\": \"<instruction for an image generator: one vertical frame of exactly that bystander view. Name every element\n   of the post and where it sits in this new view, then the photographer and the phone. The person is <person_1> from\n   ref_image_1 (same face, hair, build, clothes). This is a different camera position from ref_image_0, not a copy.>\",\n \"video\": \"<prompt for an image-to-video model, 4 seconds, no speech: the photographer steps into position, raises\n   the phone, frames, and taps the shutter; the screen flashes. Handheld bystander camera. Sound: the ambient\n   sound of the place, and a crisp camera lens shutter sound at the moment the photo is taken. Nobody talks.>\"}"
   },
   "_meta": {
    "title": "Director (Gemini)"
@@ -381,6 +381,19 @@
   }
  },
  "32": {
+  "class_type": "ComfyCloudMiniMaxMusic3TextToAudioNode",
+  "inputs": {
+   "prompt": "Soft mellow lounge jazz, instrumental: warm Rhodes piano, upright bass, brushed drums, a gentle muted trumpet. Relaxed, nostalgic, unhurried, like a quiet afternoon.",
+   "lyrics": "",
+   "seed": 1,
+   "max_duration": 10.0,
+   "audio_quality": "128k"
+  },
+  "_meta": {
+   "title": "Soundtrack (MiniMax Music 3)"
+  }
+ },
+ "33": {
   "class_type": "MomentoReveal",
   "inputs": {
    "moment": [
@@ -392,14 +405,19 @@
     0
    ],
    "hold": 1.8,
-   "flash": 0.25
+   "flash": 0.25,
+   "music": [
+    "32",
+    0
+   ],
+   "music_level": 0.35
   }
  },
- "33": {
+ "34": {
   "class_type": "SaveVideo",
   "inputs": {
    "video": [
-    "32",
+    "33",
     0
    ],
    "filename_prefix": "momento/moment",

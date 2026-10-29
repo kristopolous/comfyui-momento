@@ -4,13 +4,13 @@
 
 Momento rebuilds the scene from a bystander's point of view. Everything in the post is still there, now seen from a
 few meters behind the photographer, along with whatever the post cropped out. The person from the profile picture
-raises their phone, frames the shot and takes it. Soft jazz plays under the sounds of the place, and a lens shutter
+raises their phone, frames the shot and takes it. Soft jazz from MiniMax Music 3 plays under the sounds of the place, and a lens shutter
 clicks as the photo is taken. Then the video cuts to the real post.
 
 If the profile picture doesn't show a person, an anthropomorphic rabbit takes the photo instead.
 
 Built for Comfy's **Open Source Higgsfield** build night. It's one ComfyUI graph, it runs as an App, and it uses the
-Comfy API for the model that plans the shot.
+Comfy API for the model that plans the shot and the one that writes the music.
 
 ## How it works
 
@@ -24,13 +24,13 @@ the post ────────┘   the bystander's view of the scene, and th
                           │
        ┌──────────────────┴──────────────────┐
        ▼                                     ▼
- FLUX 3 Klein builds the frame from     LTX-2.5 animates it with native audio:
- the post's objects (ref 0) and the     the person takes the shot; ambient sound,
- person (ref 1), from a new camera  ──▶ soft jazz, a lens shutter. No speech.
- position, not the post as a start frame
-                                             │
+ FLUX 3 Klein builds the first frame    LTX-2.5 animates it with native audio:
+ from the post's objects (ref 0) and    the person takes the shot; ambient sound
+ the person (ref 1), from a new     ──▶ and a lens shutter. No speech.
+ camera position                             │
                                              ▼
-                              Momento Reveal: white shutter flash, then the real post
+ MiniMax Music 3 (Comfy Cloud) ────▶ Momento Reveal: mixes the soft jazz under the moment,
+ writes the soft jazz                white shutter flash, then the real post
 ```
 
 By default everything runs at the lowest resolution: 288×512 vertical, 4 seconds. That takes about 2.5 minutes on an
@@ -38,7 +38,7 @@ RTX 4090.
 
 ## Setup
 
-You need ComfyUI v0.43 or newer, a GPU with 24 GB, and a Comfy account for the Gemini partner node.
+You need ComfyUI v0.43 or newer, a GPU with 24 GB, and a Comfy account for the Gemini and MiniMax Music 3 nodes.
 
 **1. Install the node pack**
 
@@ -65,7 +65,7 @@ wget -P vae              $L/vae/ltx-2.5-audio-vae-bf16.safetensors
 ```
 
 **3. Sign in to Comfy.** In ComfyUI, sign in with your Comfy account, or use an API key from
-[platform.comfy.org](https://platform.comfy.org). Gemini runs through the Comfy API and uses your credits.
+[platform.comfy.org](https://platform.comfy.org). Gemini and MiniMax Music 3 run through the Comfy API and use your credits.
 
 ## Run
 

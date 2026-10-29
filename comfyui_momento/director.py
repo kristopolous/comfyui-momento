@@ -13,11 +13,12 @@ mishaps, no dialogue. Reply with JSON only:
    of the post and where it sits in this new view, then the photographer and the phone. The person is <person_1> from
    ref_image_1 (same face, hair, build, clothes). This is a different camera position from ref_image_0, not a copy.>",
  "video": "<prompt for an image-to-video model, 4 seconds, no speech: the photographer steps into position, raises
-   the phone, frames, and taps the shutter; the screen flashes. Handheld bystander camera. Sound: soft jazz playing
-   quietly under the ambient sound of the place, and a crisp camera lens shutter sound at the moment the photo is
-   taken. Nobody talks.>"}"""
+   the phone, frames, and taps the shutter; the screen flashes. Handheld bystander camera. Sound: the ambient
+   sound of the place, and a crisp camera lens shutter sound at the moment the photo is taken. Nobody talks.>"}"""
 
-QUIET = (" Soft mellow jazz plays quietly in the background. A crisp camera lens shutter sound when the photo is "
-         "taken. No speech, nobody talks.")
-VIDEO_NEGATIVE = ("speech, talking, dialogue, voice, singing, vocals, pc game, console game, video game, cartoon, "
+QUIET = " A crisp camera lens shutter sound when the photo is taken. No speech, nobody talks."
+# The soundtrack comes from MiniMax Music 3 and is mixed under LTX-2.5's ambient sound by Momento Reveal.
+MUSIC = ("Soft mellow lounge jazz, instrumental: warm Rhodes piano, upright bass, brushed drums, a gentle muted "
+         "trumpet. Relaxed, nostalgic, unhurried, like a quiet afternoon.")
+VIDEO_NEGATIVE = ("speech, talking, dialogue, voice, singing, vocals, music, pc game, console game, video game, cartoon, "
                   "childish, ugly")

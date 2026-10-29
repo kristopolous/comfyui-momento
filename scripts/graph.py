@@ -8,7 +8,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "comfyui_momento"))
-from director import DIRECTOR  # noqa: E402
+from director import DIRECTOR, MUSIC  # noqa: E402
 
 KLEIN = "flux3-image-klein-int8-convrot.safetensors"
 KLEIN_TE = "qwen3vl_4b_int8_convrot.safetensors"
@@ -69,7 +69,10 @@ def momento(profile="profile.png", post="post.png", width=288, height=512, frame
     sep = g.add("LTXVSeparateAVLatent", av_latent=out(0))
     moment = g.add("CreateVideo", images=g.add("VAEDecode", samples=sep(0), vae=vae())(),
                    audio=g.add("LTXVAudioVAEDecode", samples=sep(1), audio_vae=avae())(), fps=float(fps))
-    final = g.add("MomentoReveal", moment=moment(), post=shot(0), hold=1.8, flash=0.25)
+    music = g.add("ComfyCloudMiniMaxMusic3TextToAudioNode", "Soundtrack (MiniMax Music 3)", prompt=MUSIC, lyrics="",
+                  seed=seed, max_duration=10.0, audio_quality="128k")
+    final = g.add("MomentoReveal", moment=moment(), post=shot(0), hold=1.8, flash=0.25, music=music(0),
+                  music_level=0.35)
     g.add("SaveVideo", "Momento", video=final(), filename_prefix=prefix, format="mp4",
           **{"format.codec": "h264"})
     return g
