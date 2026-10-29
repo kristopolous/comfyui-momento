@@ -153,7 +153,47 @@ def ui_segment(take, marks, out):
        "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", "-shortest", out)
 
 
-def main(out, clips, shot=None, ui=None):
+FLASH = 97 / 24  # where MomentoReveal flashes to the post, in every Momento output
+
+
+def montage(clips, score, out, tmp, end_cards):
+    """The clips cut to one score: each flash to the real post lands on a beat. score = (audio, first_beat, period).
+    clips = [(clip, ants_shot, cell, caption, sub, ants_beats)]; end_cards = [(png, beats)]."""
+    audio, first, period = score
+    runup, hold = 8, 4  # beats of the moment before the flash, and of the post after it
+    frame = lambda t: round(t * FPS)  # noqa: E731
+    parts, flashes, beat = [], [], 0
+    for i, (clip, shot, cell, caption, sub, ants) in enumerate(clips):
+        n = frame((beat + ants) * period) - frame(beat * period)
+        ants_clip(shot, cell, n / FPS, str(tmp / f"m_ants{i}.mp4"), caption=caption, sub=sub)
+        beat += ants
+        start, stop = frame(beat * period), frame((beat + runup + hold) * period)
+        flashes.append((beat + runup) * period)
+        ff("-ss", f"{FLASH - runup * period:.4f}", "-i", clip, "-frames:v", str(stop - start), "-an",
+           "-c:v", "libx264", str(tmp / f"m_raw{i}.mp4"))
+        stage(str(tmp / f"m_raw{i}.mp4"), str(tmp / f"m_clip{i}.mp4"))
+        parts += [tmp / f"m_ants{i}.mp4", tmp / f"m_clip{i}.mp4"]
+        beat += runup + hold
+    for j, (png, beats) in enumerate(end_cards):
+        n = frame((beat + beats) * period) - frame(beat * period)
+        still_clip(png, n / FPS, str(tmp / f"m_card{j}.mp4"))
+        parts.append(tmp / f"m_card{j}.mp4")
+        beat += beats
+    length = beat * period
+    inputs = sum((["-i", str(p)] for p in parts), [])
+    ff(*inputs, "-filter_complex", "".join(f"[{i}:v]" for i in range(len(parts))) + f"concat=n={len(parts)}:v=1:a=0[v]",
+       "-map", "[v]", "-c:v", "libx264", "-pix_fmt", "yuv420p", str(tmp / "m_video.mp4"))
+    # the score from its first beat, a shutter click on every flash, fading out at the end
+    click = "aevalsrc='0.9*(random(0)*2-1)*exp(-t*70)|0.9*(random(1)*2-1)*exp(-t*70)':d=0.15:s=48000"
+    clicks = "".join(f"{click},adelay={int(t * 1000)}:all=1[c{k}];" for k, t in enumerate(flashes))
+    mix = "".join(f"[c{k}]" for k in range(len(flashes)))
+    ff("-i", str(tmp / "m_video.mp4"), "-ss", str(first), "-i", audio, "-filter_complex",
+       f"[1:a]aresample=48000,aformat=channel_layouts=stereo,afade=out:st={length - 2.5:.3f}:d=2.5[s];{clicks}"
+       f"[s]{mix}amix=inputs={len(flashes) + 1}:normalize=0,atrim=0:{length:.3f}[a]",
+       "-map", "0:v", "-map", "[a]", "-c:v", "copy", "-c:a", "aac", "-b:a", "160k", out)
+
+
+def main(out, clips, shot=None, ui=None, score=None):
     tmp = Path(tempfile.mkdtemp())
     white, grey, dim = (245, 245, 245), (170, 170, 175), (110, 110, 118)
     card(tmp / "title.png", [("MOMENTO", "Black", 120, white, 18),
@@ -182,6 +222,20 @@ def main(out, clips, shot=None, ui=None):
                      sub="One profile picture. A grid of posts.")
         still_clip(str(tmp / "profile.png"), 3.2, str(tmp / "profile.mp4"))
         parts.append(tmp / "profile.mp4")
+    if score:
+        cards = [(str(tmp / "how.png"), 12), (str(tmp / "end.png"), 10)]
+        cut = []
+        for c in clips:
+            c, _, where = c.partition(":")
+            where, _, own = where.partition(":")  # clip.mp4:row,col[:profile_screenshot.png]
+            side = Path(own or shot).with_suffix(".json")
+            name = json.loads(side.read_text()).get("name") if side.exists() else None
+            rabbit = "lappystickz" in (name or "") and not any("lappystickz" in x[3] for x in cut)
+            sub = "No face to use? A rabbit takes the shot." if rabbit else "profile picture + this post"
+            cut.append((c, own or shot, tuple(int(v) for v in where.split(",")), f"@{name}", sub, 8 if rabbit else 4))
+        montage(cut, score, str(tmp / "montage.mp4"), tmp, cards)
+        parts.append(tmp / "montage.mp4")
+        clips = []
     staged = []
     for i, c in enumerate(clips):
         c, _, where = c.partition(":")
@@ -197,10 +251,13 @@ def main(out, clips, shot=None, ui=None):
             seg.append(tmp / f"pick{i}.mp4")
         stage(c, str(tmp / f"clip{i}.mp4"))
         staged.append(seg + [tmp / f"clip{i}.mp4"])
-    half = max(1, len(staged) // 2)
+    if score:
+        staged = None
+    half = max(1, len(staged) // 2) if staged else 0
     still_clip(str(tmp / "how.png"), 4.5, str(tmp / "how.mp4"))
     still_clip(str(tmp / "end.png"), 3.5, str(tmp / "end.mp4"))
-    parts += sum(staged[:half], []) + [tmp / "how.mp4"] + sum(staged[half:], []) + [tmp / "end.mp4"]
+    if staged is not None:
+        parts += sum(staged[:half], []) + [tmp / "how.mp4"] + sum(staged[half:], []) + [tmp / "end.mp4"]
     inputs = sum((["-i", str(p)] for p in parts), [])
     streams = "".join(f"[{i}:v][{i}:a]" for i in range(len(parts)))
     ff(*inputs, "-filter_complex", f"{streams}concat=n={len(parts)}:v=1:a=1[v][a]", "-map", "[v]", "-map", "[a]",
@@ -220,4 +277,9 @@ if __name__ == "__main__":
         i = args.index("--ui")
         ui = (args[i + 1], args[i + 2], tuple(float(v) for v in args[i + 3].split(",")))
         del args[i:i + 4]
-    main(sys.argv[1], args, shot, ui)
+    score = None
+    if "--score" in args:  # --score music.flac first_beat_s,beat_period_s
+        i = args.index("--score")
+        score = (args[i + 1], *(float(v) for v in args[i + 2].split(",")))
+        del args[i:i + 3]
+    main(sys.argv[1], args, shot, ui, score)
