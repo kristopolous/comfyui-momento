@@ -16,6 +16,8 @@ from comfy_api.latest import ComfyExtension, InputImpl, Types, io, ui
 
 from .director import DIRECTOR, QUIET, VIDEO_NEGATIVE  # noqa: F401
 
+WEB_DIRECTORY = "./web"
+
 
 
 
