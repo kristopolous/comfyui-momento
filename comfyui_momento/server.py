@@ -29,6 +29,8 @@ from .graph import momento
 
 PAGE = Path(__file__).parent / "web" / "app.html"
 MAX_WAITING = 4  # runs queued at once; more gets "busy"
+TAKES = 3  # the critic (Gemini) can send a take back this many times
+JOBS = {}  # first prompt id -> {"pid": the current take's prompt id, "take", "notes", "args"}
 NAME = re.compile(r"^[A-Za-z0-9._]{1,30}$")
 
 
@@ -163,25 +165,36 @@ async def run(request):
     i = int(form["post"])
     if not 0 <= i < len(posts):
         return web.json_response({"error": "No such post."}, status=400)
-    post = posts[i]
     rel = lambda p: Path(p).relative_to(folder_paths.get_input_directory()).as_posix()  # noqa: E731
-    # part of the fun is that every run is different: a new seed, and either camera angle
-    graph = momento(rel(picture), rel(post), seed=random.randrange(2**31), angle=random.choice(["behind", "face"]),
-                    prefix=f"momento/{job}")
+    camera = "dslr" if form.get("camera") == "dslr" else "smartphone"
+    args = (rel(picture), rel(posts[i]), job, key, camera)
+    pid, err = await _shoot(*args)
+    if err:
+        return web.json_response({"error": err}, status=500)
+    JOBS[pid] = {"pid": pid, "take": 1, "notes": [], "args": args}
+    return web.json_response({"id": pid})
+
+
+async def _shoot(picture, post, job, key, camera="smartphone"):
+    """Queue one take; every take is different (a new seed). -> (prompt id, error)"""
+    graph = momento(picture, post, seed=random.randrange(2**31), angle="wide", prefix=f"momento/{job}",
+                    camera=camera)
     # a client_id makes ComfyUI track the running node (last_node_id), which /momento/status reports
     body = {"prompt": graph, "client_id": f"momento-{job}", "extra_data": {"api_key_comfy_org": key}}
     async with aiohttp.ClientSession() as s:
         async with s.post(f"http://127.0.0.1:{PromptServer.instance.port}/prompt", json=body) as r:
             res = await r.json()
     if "prompt_id" not in res:
-        return web.json_response({"error": json.dumps(res.get("node_errors") or res)[:500]}, status=500)
-    return web.json_response({"id": res["prompt_id"]})
+        return None, json.dumps(res.get("node_errors") or res)[:500]
+    return res["prompt_id"], None
 
 
 @routes.get("/momento/status/{id}")
 async def status(request):
-    pid = request.match_info["id"]
+    job = JOBS.get(request.match_info["id"]) or {"pid": request.match_info["id"], "take": 1, "notes": []}
+    pid = job["pid"]
     port = PromptServer.instance.port
+    takes = {"take": job["take"], "notes": job["notes"]}
     async with aiohttp.ClientSession() as s:
         async with s.get(f"http://127.0.0.1:{port}/history/{pid}") as r:
             hist = (await r.json()).get(pid)
@@ -191,17 +204,30 @@ async def status(request):
             running = next((item for item in q["queue_running"] if item[1] == pid), None)
             srv = PromptServer.instance  # ComfyUI keeps the running prompt and node here
             node = srv.last_node_id if running and getattr(srv, "last_prompt_id", None) == pid else None
-            kind = running[2].get(str(node), {}).get("class_type") if running and node else None
-            return web.json_response({"state": "running" if running else "queued", "node": kind})
+            spec = running[2].get(str(node), {}) if running and node else {}
+            kind = "Critic" if spec.get("_meta", {}).get("title", "").startswith("Critic") else spec.get("class_type")
+            return web.json_response({"state": "running" if running else "queued", "node": kind, **takes})
     st = hist["status"]
     if st.get("status_str") == "error":
         msg = next((m[1].get("exception_message") for m in st.get("messages", []) if m[0] == "execution_error"), "")
         return web.json_response({"state": "error", "error": (msg or "failed")[:400]})
-    video, plan = None, None
+    video, plan, verdict = None, None, {}
     for out in hist["outputs"].values():
         for f in out.get("images", []) + out.get("videos", []):
             if f["filename"].endswith(".mp4"):
                 video = f"view?type={f['type']}&subfolder={f['subfolder']}&filename={f['filename']}"
-        if out.get("text"):
-            plan = out["text"][0]
-    return web.json_response({"state": "done", "video": video, "plan": plan})
+        for text in out.get("text", []):
+            if text.startswith("REVIEW "):
+                verdict = json.loads(text[7:])
+            elif text.startswith("THE SHOT"):
+                plan = text
+    if not verdict.get("pass", True) and job.get("args") and job["take"] < TAKES:
+        # the critic sent it back: reshoot with a new seed, and say why
+        new, err = await _shoot(*job["args"])
+        if not err:
+            job["notes"].append(verdict.get("problem") or "not good enough")
+            job["take"] += 1
+            job["pid"] = new
+            return web.json_response({"state": "running", "node": "Reshoot", "take": job["take"],
+                                      "notes": job["notes"]})
+    return web.json_response({"state": "done", "video": video, "plan": plan, "review": verdict, **takes})

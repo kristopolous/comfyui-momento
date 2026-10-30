@@ -68,19 +68,31 @@ def _circle(cx, cy, r, n=72):
     return [(cx + r * math.cos(2 * math.pi * i / n), cy + r * math.sin(2 * math.pi * i / n)) for i in range(n)]
 
 
+def _layout(shot):
+    """The screenshot's own layout from its sidecar JSON (crop, profile picture, grid), else the defaults."""
+    side = Path(shot).with_suffix(".json")
+    j = json.loads(side.read_text()) if side.exists() else {}
+    with Image.open(shot) as im:
+        w, h = im.size
+    crop = j.get("crop", SHOT_CROP)
+    crop = (max(0, crop[0]), max(0, crop[1]), min(w, crop[2]), min(h, crop[3]))
+    return crop, tuple(j.get("pic", PIC)), tuple(j.get("grid", GRID))
+
+
 def profile_card(path, shot, cell=None, caption=None, sub=None, phase=0.0):
     """One frame of the profile screenshot. With `cell`, everything but the profile picture and that post is dimmed
     and both get marching ants (advance `phase` frame to frame to make them march)."""
     im = Image.new("RGB", (W, H), (8, 8, 10))
-    src = Image.open(shot).convert("RGB").crop(SHOT_CROP)
+    crop, pic, grid = _layout(shot)
+    src = Image.open(shot).convert("RGB").crop(crop)
     scale = (H - 40) / src.height
     src = src.resize((round(src.width * scale), H - 40), Image.LANCZOS)
     ox, oy = 120, 20
-    to = lambda x, y: ((x - SHOT_CROP[0]) * scale + ox, (y - SHOT_CROP[1]) * scale + oy)  # noqa: E731
+    to = lambda x, y: ((x - crop[0]) * scale + ox, (y - crop[1]) * scale + oy)  # noqa: E731
     im.paste(src, (ox, oy))
     if cell is not None:
-        x, y, r = PIC
-        left, top, cw, ch = GRID
+        x, y, r = pic
+        left, top, cw, ch = grid
         row, col = cell
         (bx0, by0), (bx1, by1) = to(left + col * cw, top + row * ch), to(left + (col + 1) * cw, top + (row + 1) * ch)
         (cx, cy), rr = to(x, y), (r + 3) * scale
@@ -153,7 +165,14 @@ def ui_segment(take, marks, out):
        "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", "-shortest", out)
 
 
-FLASH = 97 / 24  # where MomentoReveal flashes to the post, in every Momento output
+REVEAL = 1.8 + 0.25  # the post's hold and the flash, after the moment, in every Momento output
+
+
+def flash_at(clip):
+    """Where the clip flashes to the post: its length minus the reveal."""
+    out = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", clip],
+                         capture_output=True, text=True).stdout
+    return float(out) - REVEAL
 
 
 def montage(clips, score, out, tmp, end_cards):
@@ -169,7 +188,7 @@ def montage(clips, score, out, tmp, end_cards):
         beat += ants
         start, stop = frame(beat * period), frame((beat + runup + hold) * period)
         flashes.append((beat + runup) * period)
-        ff("-ss", f"{FLASH - runup * period:.4f}", "-i", clip, "-frames:v", str(stop - start), "-an",
+        ff("-ss", f"{flash_at(clip) - runup * period:.4f}", "-i", clip, "-frames:v", str(stop - start), "-an",
            "-c:v", "libx264", str(tmp / f"m_raw{i}.mp4"))
         stage(str(tmp / f"m_raw{i}.mp4"), str(tmp / f"m_clip{i}.mp4"))
         parts += [tmp / f"m_ants{i}.mp4", tmp / f"m_clip{i}.mp4"]
@@ -180,6 +199,11 @@ def montage(clips, score, out, tmp, end_cards):
         parts.append(tmp / f"m_card{j}.mp4")
         beat += beats
     length = beat * period
+    t = 0.0
+    for p in parts:  # where each part starts in the montage, for the narration
+        print(f"  montage {t:7.2f}  {Path(p).stem}")
+        t += float(subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0",
+                                   str(p)], capture_output=True, text=True).stdout)
     inputs = sum((["-i", str(p)] for p in parts), [])
     ff(*inputs, "-filter_complex", "".join(f"[{i}:v]" for i in range(len(parts))) + f"concat=n={len(parts)}:v=1:a=0[v]",
        "-map", "[v]", "-c:v", "libx264", "-pix_fmt", "yuv420p", str(tmp / "m_video.mp4"))
@@ -188,7 +212,8 @@ def montage(clips, score, out, tmp, end_cards):
     clicks = "".join(f"{click},adelay={int(t * 1000)}:all=1[c{k}];" for k, t in enumerate(flashes))
     mix = "".join(f"[c{k}]" for k in range(len(flashes)))
     ff("-i", str(tmp / "m_video.mp4"), "-ss", str(first), "-i", audio, "-filter_complex",
-       f"[1:a]aresample=48000,aformat=channel_layouts=stereo,afade=out:st={length - 2.5:.3f}:d=2.5[s];{clicks}"
+       f"[1:a]aresample=48000,aformat=channel_layouts=stereo,afade=in:st=0:d=2,afade=out:st={length - 6:.3f}:d=6[s];"
+       f"{clicks}"
        f"[s]{mix}amix=inputs={len(flashes) + 1}:normalize=0,atrim=0:{length:.3f}[a]",
        "-map", "0:v", "-map", "[a]", "-c:v", "copy", "-c:a", "aac", "-b:a", "160k", out)
 
@@ -200,12 +225,14 @@ def main(out, clips, shot=None, ui=None, score=None):
                              ("Every photo has a moment.", "Light", 34, grey, 0)])
     card(tmp / "pitch.png", [("Type an Instagram name. Tap a post.", "Medium", 40, white, 14),
                              ("See the moment the photo was taken.", "Light", 34, grey, 0)])
-    card(tmp / "how.png", [("ONE COMFYUI GRAPH", "Bold", 26, dim, 30),
-                           ("Gemini 3.1 Pro plans the moment", "Medium", 36, white, 12),
-                           ("FLUX 3 Klein builds the first frame", "Medium", 36, white, 12),
-                           ("LTX-2.5 films it, with sound", "Medium", 36, white, 12),
-                           ("MiniMax Music 3 scores it", "Medium", 36, white, 30),
-                           ("open weights + the Comfy API  ·  runs as a Comfy App", "Light", 26, grey, 0)])
+    card(tmp / "how.png", [("ALL COMFYUI", "Bold", 26, dim, 26),
+                           ("Gemini, or a local Qwen, plans the moment", "Medium", 32, white, 10),
+                           ("FLUX 3 draws the person in the profile picture", "Medium", 32, white, 10),
+                           ("Depth Anything 3 rebuilds the place in 3D", "Medium", 32, white, 10),
+                           ("so they stand exactly where the camera was", "Light", 30, grey, 10),
+                           ("MiniMax H3 and LTX-2.5 film them taking the shot", "Medium", 32, white, 10),
+                           ("every take reviewed, the best one kept", "Medium", 32, white, 26),
+                           ("open weights  ·  Comfy Cloud or your own GPU  ·  a Comfy App", "Light", 24, grey, 0)])
     card(tmp / "end.png", [("MOMENTO", "Black", 96, white, 20),
                            ("github.com/kristopolous/comfyui-momento", "Medium", 32, grey, 0)])
     parts = []
@@ -223,7 +250,7 @@ def main(out, clips, shot=None, ui=None, score=None):
         still_clip(str(tmp / "profile.png"), 3.2, str(tmp / "profile.mp4"))
         parts.append(tmp / "profile.mp4")
     if score:
-        cards = [(str(tmp / "how.png"), 12), (str(tmp / "end.png"), 10)]
+        cards = [(str(tmp / "how.png"), 40), (str(tmp / "end.png"), 12)]
         cut = []
         for c in clips:
             c, _, where = c.partition(":")
@@ -258,6 +285,11 @@ def main(out, clips, shot=None, ui=None, score=None):
     still_clip(str(tmp / "end.png"), 3.5, str(tmp / "end.mp4"))
     if staged is not None:
         parts += sum(staged[:half], []) + [tmp / "how.mp4"] + sum(staged[half:], []) + [tmp / "end.mp4"]
+    t = 0.0
+    for p in parts:  # where each part starts in the demo, for the narration
+        print(f"demo {t:7.2f}  {Path(p).stem}")
+        t += float(subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0",
+                                   str(p)], capture_output=True, text=True).stdout)
     inputs = sum((["-i", str(p)] for p in parts), [])
     streams = "".join(f"[{i}:v][{i}:a]" for i in range(len(parts)))
     ff(*inputs, "-filter_complex", f"{streams}concat=n={len(parts)}:v=1:a=1[v][a]", "-map", "[v]", "-map", "[a]",

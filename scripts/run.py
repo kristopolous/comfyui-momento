@@ -5,6 +5,7 @@ The Gemini node needs a Comfy API key: COMFY_API_KEY in the environment or in .e
 """
 import json
 import os
+import random
 import sys
 import time
 import urllib.parse
@@ -28,10 +29,20 @@ def key():
     raise SystemExit("Set COMFY_API_KEY")
 
 
+TAKES = 3  # the critic can send a take back this many times
+
+
 def submit(profile, post, out):
-    name = Path(post).stem
-    g = momento(comfy.upload(profile, f"momento_profile_{Path(profile).stem}.png"),
-                        comfy.upload(post, f"momento_{name}.png"), angle=ANGLE, prefix=f"momento/{name}_{ANGLE}")
+    pic, img = comfy.upload(profile, f"momento_profile_{Path(profile).stem}.png"), comfy.upload(post, f"momento_{Path(post).stem}.png")
+    for take in range(1, TAKES + 1):
+        verdict = shoot(pic, img, Path(post).stem, out, seed=random.randrange(2**31), take=take)
+        if verdict.get("pass", True):
+            return
+        print(f"[{Path(post).stem}] take {take} rejected: {verdict.get('problem')}", flush=True)
+
+
+def shoot(pic, img, name, out, seed, take):
+    g = momento(pic, img, angle=ANGLE, seed=seed, prefix=f"momento/{name}_{ANGLE}")
     body = json.dumps({"prompt": g, "client_id": comfy.CLIENT_ID, "extra_data": {"api_key_comfy_org": key()}}).encode()
     res = json.loads(comfy._req("/prompt", body, {"Content-Type": "application/json"}))
     if res.get("node_errors"):
@@ -41,15 +52,19 @@ def submit(profile, post, out):
         time.sleep(2)
     if h["status"]["status_str"] == "error":
         raise RuntimeError(json.dumps([m for m in h["status"]["messages"] if m[0] == "execution_error"])[:3000])
+    verdict = {}
     for node in h["outputs"].values():
         for text in node.get("text", []):
             print(f"[{name}] {text}\n", flush=True)
+            if text.startswith("REVIEW "):
+                verdict = json.loads(text[7:])
         for f in node.get("images", []) + node.get("videos", []):
             q = urllib.parse.urlencode({k: f[k] for k in ("filename", "subfolder", "type")})
-            dest = Path(out) / f"{name}_{ANGLE}.mp4"
+            dest = Path(out) / f"{name}_{ANGLE}_take{take}.mp4"
             dest.parent.mkdir(parents=True, exist_ok=True)
             dest.write_bytes(comfy._req(f"/view?{q}"))
             print(f"[{name}] {dest}  ({time.time() - t:.0f}s)", flush=True)
+    return verdict
 
 
 if __name__ == "__main__":

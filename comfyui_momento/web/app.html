@@ -86,6 +86,11 @@
   .elapsed { margin-top: 14px; color: var(--dim); font-variant-numeric: tabular-nums; }
   .foot { padding: 14px 16px; border-top: 1px solid var(--line); display: flex; gap: 10px; }
   .foot .primary { margin: 0; }
+  .holds { display: flex; border: 1px solid var(--line); border-radius: 10px; overflow: hidden; flex: none; }
+  .holds label { padding: 11px 12px; font-weight: 600; font-size: 13px; cursor: pointer; color: var(--dim); }
+  .holds input { display: none; }
+  .holds input:checked + span { color: var(--fg); }
+  .holds label:has(input:checked) { background: #1c1c1e; }
   .foot a { display: none; flex: none; color: var(--fg); border: 1px solid var(--line); border-radius: 10px; padding: 11px 14px; text-decoration: none; font-weight: 600; }
   .done-state .foot a { display: block; }
   @media (max-width: 720px) {
@@ -139,13 +144,20 @@
           <li data-step="plan"><i></i>Planning the moment<small>Gemini 3.1 Pro</small></li>
           <li data-step="frame"><i></i>Building the scene<small>FLUX 3 Klein</small></li>
           <li data-step="film"><i></i>Filming it, with sound<small>LTX-2.5</small></li>
+          <li data-step="review"><i></i>Reviewing the take<small>Gemini 3.1 Pro</small></li>
           <li data-step="score"><i></i>Scoring it<small>MiniMax Music 3</small></li>
           <li data-step="cut"><i></i>Developing<small>Momento</small></li>
         </ul>
         <div class="elapsed" id="elapsed"></div>
         <div class="error" id="moment-error"></div>
       </div>
-      <div class="foot"><button class="primary" id="make">Make the moment</button><a id="save" download>Save</a></div>
+      <div class="foot">
+        <div class="holds" id="holds" title="What the photographer holds">
+          <label><input type="radio" name="camera" value="smartphone" checked><span>📱 Phone</span></label>
+          <label><input type="radio" name="camera" value="dslr"><span>📷 DSLR</span></label>
+        </div>
+        <button class="primary" id="make">Make the moment</button><a id="save" download>Save</a>
+      </div>
     </div>
   </div>
 </section>
@@ -170,11 +182,13 @@ const STEP = {
   VAEDecode: "film", EmptyLTXVLatentVideo: "film", LTXVImgToVideoInplace: "film", LTXVEmptyLatentAudio: "film",
   LTXVConcatAVLatent: "film", LTXVConditioning: "film", RandomNoise: "film", CFGGuider: "film", KSamplerSelect: "film",
   ManualSigmas: "film", SamplerCustomAdvanced: "film", LTXVSeparateAVLatent: "film", LTXVAudioVAEDecode: "film",
-  CreateVideo: "film",
+  CreateVideo: "film", MomentoCanvas: "frame", MomentoPaste: "frame", VAEEncode: "frame", SetLatentNoiseMask: "frame",
+  MomentoFit: "film", LTXVAddGuide: "film", LTXVCropGuides: "film",
+  Critic: "review", MomentoReview: "review",
   ComfyCloudMiniMaxMusic3TextToAudioNode: "score",
   MomentoReveal: "cut", SaveVideo: "cut",
 };
-const ORDER = ["plan", "frame", "film", "score", "cut"];
+const ORDER = ["plan", "frame", "film", "review", "score", "cut"];
 
 function show(view) {
   $("landing").style.display = view === "landing" ? "grid" : "none";
@@ -250,6 +264,7 @@ async function make() {
   $("moment-error").textContent = "";
   const form = new FormData();
   form.append("name", profile.name); form.append("post", current);
+  form.append("camera", document.querySelector("input[name=camera]:checked").value);
   let id;
   try {
     const r = await fetch(api("momento/run"), { method: "POST", body: form });
@@ -272,7 +287,9 @@ async function make() {
     try { st = await json(await fetch(api(`momento/status/${id}`))); } catch { return; }
     if (st.state === "queued") { $("title").textContent = "Waiting for the camera…"; return; }
     if (st.state === "running") {
-      $("title").textContent = "The moment";
+      if (st.node === "Reshoot") { seen = new Set(); setStep(null); }
+      const why = (st.notes || []).at(-1);
+      $("title").textContent = st.take > 1 ? `Take ${st.take} · take ${st.take - 1} sent back: ${why}` : "The moment";
       const step = STEP[st.node];
       if (step) setStep(step);
       return;

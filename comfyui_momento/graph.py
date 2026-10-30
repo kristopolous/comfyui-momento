@@ -5,9 +5,9 @@
 import math
 
 try:
-    from .director import director as plan_prompt
+    from .director import CRITIC, director as plan_prompt
 except ImportError:  # imported as a plain module by scripts/
-    from director import director as plan_prompt
+    from director import CRITIC, director as plan_prompt
 
 KLEIN = "flux3-image-klein-int8-convrot.safetensors"
 KLEIN_TE = "qwen3vl_4b_int8_convrot.safetensors"
@@ -27,20 +27,26 @@ class Graph(dict):
 
 
 def momento(profile="profile.png", post="post.png", width=288, height=512, frames=97, fps=24, seed=1,
-            angle="behind", prefix="momento/moment"):
-    """angle: "behind" (over the shoulder, ending on the post itself as the last keyframe) or "face" (from the side,
-    the photographer's face in view)."""
+            angle="behind", prefix="momento/moment", camera="smartphone"):
+    """angle: "wide" (the post outpainted into the wider place, the photographer in front of it, pushing in to the
+    post), "behind" (over the shoulder, ending on the post itself as the last keyframe) or "face" (from the side, the
+    photographer's face in view)."""
     g = Graph()
     who = g.add("LoadImage", "Profile picture", image=profile)
     shot = g.add("LoadImage", "The post", image=post)
     both = g.add("ImageStitch", image1=who(0), image2=shot(0), direction="right", match_image_size=True,
                  spacing_width=0, spacing_color="white")
     gemini = g.add("GeminiNode", "Director (Gemini)", prompt="Plan the moment this post was taken.",
-                   model="gemini-3-1-pro", seed=seed, images=both(0), system_prompt=plan_prompt(angle))
+                   model="gemini-3-1-pro", seed=seed, images=both(0), system_prompt=plan_prompt(angle, camera))
 
     kclip = g.add("CLIPLoader", clip_name=KLEIN_TE, type="flux3", device="default")
     lclip = g.add("CLIPLoader", clip_name=LTX_TE, type="ltxv", device="default")
-    plan = g.add("MomentoPlan", plan=gemini(0), image_clip=kclip(), video_clip=lclip())
+    wide = angle == "wide"
+    if wide:  # the real post placed in a bigger frame; its box goes into Klein's FLUX 3 layout
+        canvas = g.add("MomentoCanvas", post=shot(0), width=width, height=height, scale=0.62, center_y=0.4,
+                       occlude=0.3, feather=10)
+    plan = g.add("MomentoPlan", plan=gemini(0), image_clip=kclip(), video_clip=lclip(),
+                 **({"scene_box": canvas(2)} if wide else {}))
 
     # FLUX 3 Klein: the bystander's frame, built from the post's objects (ref 0) and the person (ref 1)
     kvae = g.add("VAELoader", vae_name=FLUX_VAE)
@@ -49,10 +55,22 @@ def momento(profile="profile.png", post="post.png", width=288, height=512, frame
                    max_shift=mu, base_shift=mu, width=width, height=height)
     refs = g.add("ReferenceMultiLatent", positive=plan(0), negative=plan(1), vae=kvae(), resolution="resize",
                  **{"resolution.megapixels": 0.07, "images.image0": shot(0), "images.image1": who(0)})
+    # wide: Klein paints the whole frame; FLUX 3's layout puts the post's scene (its box from Momento Canvas) in it.
+    # Pasting the real pixels in instead made the photo read as a screen on a wall, frozen.
+    start = g.add("EmptyFlux2LatentImage", width=width, height=height, batch_size=1)()
     still = g.add("KSampler", model=kmodel(), seed=seed, steps=16, cfg=1.0, sampler_name="euler", scheduler="simple",
-                  positive=refs(0), negative=refs(1), denoise=1.0,
-                  latent_image=g.add("EmptyFlux2LatentImage", width=width, height=height, batch_size=1)())
+                  positive=refs(0), negative=refs(1), denoise=1.0, latent_image=start)
     frame = g.add("VAEDecode", samples=still(), vae=kvae())
+    end = None
+    if wide:
+        # the instant itself, in the wider scene. The video starts a second earlier, mid-action.
+        end = frame
+        earlier = g.add("ReferenceMultiLatent", positive=plan(5), negative=plan(1), vae=kvae(), resolution="resize",
+                        **{"resolution.megapixels": 0.07, "images.image0": end(0), "images.image1": who(0)})
+        frame = g.add("VAEDecode", vae=kvae(), samples=g.add(
+            "KSampler", model=kmodel(), seed=seed + 1, steps=16, cfg=1.0, sampler_name="euler", scheduler="simple",
+            positive=earlier(0), negative=earlier(1), denoise=1.0,
+            latent_image=g.add("EmptyFlux2LatentImage", width=width, height=height, batch_size=1)())())
 
     # LTX-2.5: the shot being taken, with the place's sound
     vae = g.add("VAELoader", vae_name=LTX_VAE)
@@ -62,11 +80,11 @@ def momento(profile="profile.png", post="post.png", width=288, height=512, frame
     audio = g.add("LTXVEmptyLatentAudio", frames_number=frames, frame_rate=fps, batch_size=1, audio_vae=avae())
     cond = g.add("LTXVConditioning", positive=plan(2), negative=plan(3), frame_rate=float(fps))
     pos, neg, video_latent = cond(0), cond(1), lat()
-    if angle == "behind":
-        # last keyframe: the post itself, so the camera ends on exactly what the phone sees
-        view = g.add("MomentoFit", image=shot(0), width=width, height=height)
+    if angle in ("behind", "wide"):
+        # last keyframe: the post itself (behind: what the phone sees; wide: the instant, in the wider scene)
+        view = end or g.add("MomentoFit", image=shot(0), width=width, height=height)
         guide = g.add("LTXVAddGuide", positive=pos, negative=neg, vae=vae(), latent=video_latent, image=view(),
-                      frame_idx=-1, strength=0.9)
+                      frame_idx=-1, strength=1.0 if wide else 0.9)
         pos, neg, video_latent = guide(0), guide(1), guide(2)
     av = g.add("LTXVConcatAVLatent", video_latent=video_latent, audio_latent=audio())
     lmodel = g.add("UNETLoader", unet_name=LTX, weight_dtype="default")
@@ -76,10 +94,14 @@ def momento(profile="profile.png", post="post.png", width=288, height=512, frame
                 sigmas=g.add("ManualSigmas", sigmas=LTX_SIGMAS)(), latent_image=av())
     sep = g.add("LTXVSeparateAVLatent", av_latent=out(0))
     video_out = sep(0)
-    if angle == "behind":  # drop the keyframe's extra latent before decoding
+    if angle in ("behind", "wide"):  # drop the keyframe's extra latent before decoding
         video_out = g.add("LTXVCropGuides", positive=pos, negative=neg, latent=video_out)(2)
     moment = g.add("CreateVideo", images=g.add("VAEDecode", samples=video_out, vae=vae())(),
                    audio=g.add("LTXVAudioVAEDecode", samples=sep(1), audio_vae=avae())(), fps=float(fps))
+    # the critic: Gemini watches the take; the page reshoots a rejected one with a new seed
+    critic = g.add("GeminiNode", "Critic (Gemini)", prompt="Review this take.", model="gemini-3-1-pro", seed=seed,
+                   images=both(0), video=moment(), system_prompt=CRITIC)
+    g.add("MomentoReview", "Review", verdict=critic(0))
     music = g.add("ComfyCloudMiniMaxMusic3TextToAudioNode", "Soundtrack (MiniMax Music 3)", prompt=plan(4), lyrics="",
                   seed=seed, max_duration=10.0, audio_quality="128k")
     final = g.add("MomentoReveal", moment=moment(), post=shot(0), hold=1.8, flash=0.25, music=music(0),

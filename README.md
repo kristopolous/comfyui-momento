@@ -93,6 +93,35 @@ To rebuild the graph, run `python scripts/graph.py > workflows/momento_api.json`
 Use photos the person actually took, with nothing in front of the camera except the scene. Posts where they appear
 themselves don't fit the idea.
 
+## The full pipeline: geometry, not prompts
+
+The page above runs the single-graph version. The demo video's shots come from a stepped pipeline where the
+relationship between the photographer and the scene is computed, not described:
+
+1. **Plan.** A vision LLM looks at the profile picture and the post: the scene, the action, the photographer, the
+   soundscape. This is Gemini 3.1 Pro on Comfy Cloud, or any local Ollama-API vision model.
+2. **Character sheet.** FLUX 3 draws the account owner as a turnaround (front, side, back, camera raised). If the
+   profile picture isn't a person, it draws an anonymous person instead.
+3. **The place in 3D.** Depth Anything 3 (metric) rebuilds the post as a mesh. The post's camera is where the
+   photographer stood. `RenderMesh` renders the bystander's view from behind them, and FLUX 3 fills the gaps.
+4. **Placement.** FLUX 3 puts the photographer from the sheet into that view. The layout boxes are projected from
+   their 3D position, so they face the subject with the phone or camera aimed at it.
+5. **Film it.** MiniMax H3 films the seconds before the instant, ending on that frame. Its `overall_soundscape`
+   prompt structure keeps it free of generated speech. Camera moves (dolly in, orbit, crane down) start from a
+   second camera position in the same 3D scene.
+6. **Review.** The LLM watches each take and the best one is kept. Shot-type routing sends close-ups (a laptop on a
+   desk) through outpainting instead of geometry.
+
+Options: `CAMERA=smartphone|dslr` sets what the photographer holds (also a toggle on the page). `FORCE_MOVE=1`
+always uses a camera move. `RES=576x1024` sets the size on a bigger GPU.
+
+    python scripts/moment.py profile.jpg post.jpg ...      # Comfy Cloud: FLUX 3 + H3 + LTX-2.5 inpaint, Gemini
+    COMFY_URL=http://<gpu>:8188 PLANNER_URL=http://<ollama>:11434/api/chat PLANNER_MODEL=<vision model> \
+        python scripts/local.py --hires profile.jpg post.jpg ...   # your GPU: FLUX 3 Klein + H3, open weights
+
+`scripts/demo.py` cuts the demo video. It shows marching ants on the real profile, scene text from each post's
+location tag and date, the narration, and the music.
+
 ## License
 
 MIT. See [LICENSE](LICENSE).
