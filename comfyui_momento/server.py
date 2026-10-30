@@ -12,6 +12,7 @@ Runs use the server's Comfy API key (COMFY_API_KEY) for Gemini and MiniMax Music
 import asyncio
 import html.parser
 import json
+import logging
 import os
 import random
 import re
@@ -133,6 +134,10 @@ async def profile(request):
     if not NAME.match(name):
         return web.json_response({"name": name, "found": False})
     found = None if request.query.get("refresh") else _profile(name)
+    if not found and not _browser():
+        msg = "This server can't open Instagram profiles: install chromium (e.g. apt install chromium)."
+        logging.warning("Momento: %s", msg)
+        return web.json_response({"name": name, "found": False, "error": msg})
     found = found or await _fetch_profile(name)
     if not found:
         return web.json_response({"name": name, "found": False})

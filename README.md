@@ -58,16 +58,19 @@ You need **ComfyUI v0.43 or newer**. There are three ways to run it:
 ```bash
 cd ComfyUI/custom_nodes
 git clone https://github.com/kristopolous/comfyui-momento
-pip install -r comfyui-momento/scripts/requirements.txt   # only for the scripts in scripts/
+python -m pip install -r comfyui-momento/scripts/requirements.txt   # in ComfyUI's venv; only for scripts/
 ```
 
 The node pack has no Python dependencies beyond ComfyUI. The page also needs `chromium` (or `google-chrome`) on the
-server to read public profiles.
+server to read public profiles: `sudo apt install chromium`.
 
 ### 2. Download the models
 
-**For A (your own GPU).** FLUX 3 Klein is gated, so first accept its license at
-https://huggingface.co/black-forest-labs/flux-3-image-klein-comfy and log in with `huggingface-cli login`.
+FLUX 3 Klein (used by A and C) and LTX-2.5 (used by C) are gated: accept their licenses at
+https://huggingface.co/black-forest-labs/flux-3-image-klein-comfy and https://huggingface.co/Lightricks/LTX-2.5,
+then log in with `hf auth login`. Run these from the ComfyUI folder's parent (`cd ../..` after step 1).
+
+**For A (your own GPU).**
 
 ```bash
 cd ComfyUI/models
@@ -88,14 +91,17 @@ wget -P geometry_estimation $D/geometry_estimation/depth_anything_3_metric_large
 
 For the planner and critic, run any vision chat model that speaks the Ollama API, for example `ollama pull qwen3-vl`.
 
-**For C (the page).** Add LTX-2.5:
+**For C (the page).** C needs only the three FLUX 3 Klein files from A, plus LTX-2.5. It doesn't need H3 or Depth
+Anything 3; Gemini and MiniMax Music 3 run through the Comfy API.
 
 ```bash
+cd ComfyUI/models
 L=https://huggingface.co/Lightricks/LTX-2.5/resolve/main
-wget -P diffusion_models $L/diffusion_models/ltx-2.5-22b-distilled-transformer-comfy-int8-convrot.safetensors
-wget -P text_encoders    $L/text_encoders/gemma4-12b-with-proj-ltx-2.5-comfy-int8-convrot.safetensors
-wget -P vae              $L/vae/ltx-2.5-video-vae-bf16.safetensors
-wget -P vae              $L/vae/ltx-2.5-audio-vae-bf16.safetensors
+TOKEN=$(cat ~/.cache/huggingface/token)
+wget --header="Authorization: Bearer $TOKEN" -P diffusion_models $L/diffusion_models/ltx-2.5-22b-distilled-transformer-comfy-int8-convrot.safetensors
+wget --header="Authorization: Bearer $TOKEN" -P text_encoders    $L/text_encoders/gemma4-12b-with-proj-ltx-2.5-comfy-int8-convrot.safetensors
+wget --header="Authorization: Bearer $TOKEN" -P vae              $L/vae/ltx-2.5-video-vae-bf16.safetensors
+wget --header="Authorization: Bearer $TOKEN" -P vae              $L/vae/ltx-2.5-audio-vae-bf16.safetensors
 ```
 
 **For B (Comfy Cloud).** Nothing to download.

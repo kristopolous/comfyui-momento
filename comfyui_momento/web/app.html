@@ -205,7 +205,7 @@ async function openProfile(name) {
     const r = await fetch(api(`momento/profile/${encodeURIComponent(name)}`));
     const p = await json(r);
     p.picture = api(p.picture); p.posts = p.posts.map(api);
-    if (!p.found) throw new Error(`Couldn't open @${name}. Is the profile public?`);
+    if (!p.found) throw new Error(p.error || `Couldn't open @${name}. Is the profile public?`);
     profile = p;
     $("picture").src = $("mini").src = p.picture;
     $("handle").textContent = $("mini-name").textContent = p.name;

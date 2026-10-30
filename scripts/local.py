@@ -48,7 +48,7 @@ PLANNER_MODEL = os.environ.get("PLANNER_MODEL", "qwen3-vl")
 
 KLEIN, KLEIN_TE, FLUX_VAE = ("flux3-image-klein-int8-convrot.safetensors", "qwen3vl_4b_int8_convrot.safetensors",
                              "flux2-vae.safetensors")
-H3 = dict(unet=os.environ.get("H3_UNET", "minimax_h3_fl2va_pruned_fp8_scaled.safetensors"),
+H3 = dict(unet=os.environ.get("H3_UNET", "minimax_h3_fl2va_pruned_int8_convrot.safetensors"),
           lora="minimax_h3_fl2v_turbo_8step_v1.0_comfyui_bf16.safetensors",
           vae="minimax_h3_video_vae_int8_convrot.safetensors", audio_vae="minimax_h3_audio_vae_fp32.safetensors",
           clip="qwen3vl_32b_minimax_h3_int8_convrot.safetensors")
