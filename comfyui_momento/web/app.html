@@ -86,6 +86,7 @@
   .elapsed { margin-top: 14px; color: var(--dim); font-variant-numeric: tabular-nums; }
   .foot { padding: 14px 16px; border-top: 1px solid var(--line); display: flex; gap: 10px; }
   .foot .primary { margin: 0; }
+  .took { color: var(--accent); text-decoration: underline; text-underline-offset: 3px; }
   .holds { display: flex; border: 1px solid var(--line); border-radius: 10px; overflow: hidden; flex: none; }
   .holds label { padding: 11px 12px; font-weight: 600; font-size: 13px; cursor: pointer; color: var(--dim); }
   .holds input { display: none; }
@@ -141,11 +142,10 @@
         <h3 id="title">The moment</h3>
         <p class="sub" id="sub">How this photo was taken: a bystander's view, built from the post itself.</p>
         <ul class="steps" id="steps">
-          <li data-step="plan"><i></i>Planning the moment<small>Gemini 3.1 Pro</small></li>
-          <li data-step="frame"><i></i>Building the scene<small>FLUX 3 Klein</small></li>
-          <li data-step="film"><i></i>Filming it, with sound<small>LTX-2.5</small></li>
+          <li data-step="plan"><i></i>Planning the moment<small>vision LLM</small></li>
+          <li data-step="frame"><i></i>Rebuilding the place in 3D<small>Depth Anything 3 · FLUX 3</small></li>
+          <li data-step="film"><i></i>Filming it, camera moving<small>MiniMax H3</small></li>
           <li data-step="review"><i></i>Reviewing the take<small>Gemini 3.1 Pro</small></li>
-          <li data-step="score"><i></i>Scoring it<small>MiniMax Music 3</small></li>
           <li data-step="cut"><i></i>Developing<small>Momento</small></li>
         </ul>
         <div class="elapsed" id="elapsed"></div>
@@ -185,10 +185,14 @@ const STEP = {
   CreateVideo: "film", MomentoCanvas: "frame", MomentoPaste: "frame", VAEEncode: "frame", SetLatentNoiseMask: "frame",
   MomentoFit: "film", LTXVAddGuide: "film", LTXVCropGuides: "film",
   Critic: "review", MomentoReview: "review",
+  DA3Inference: "frame", LoadDA3Model: "frame", DA3GeometryToMesh: "frame", CreateCameraInfo: "frame",
+  RenderMesh: "frame", ModelSamplingFlux: "frame", ReferenceMultiLatent: "frame",
+  LoraLoaderModelOnly: "film", MiniMaxH3ImageToVideo: "film", BasicGuider: "film", BasicScheduler: "film",
+  VAEDecodeAudio: "film", ImageStitch: "review",
   ComfyCloudMiniMaxMusic3TextToAudioNode: "score",
   MomentoReveal: "cut", SaveVideo: "cut",
 };
-const ORDER = ["plan", "frame", "film", "review", "score", "cut"];
+const ORDER = ["plan", "frame", "film", "review", "cut"];
 
 function show(view) {
   $("landing").style.display = view === "landing" ? "grid" : "none";
@@ -288,8 +292,14 @@ async function make() {
     if (st.state === "queued") { $("title").textContent = "Waiting for the camera…"; return; }
     if (st.state === "running") {
       if (st.node === "Reshoot") { seen = new Set(); setStep(null); }
-      const why = (st.notes || []).at(-1);
-      $("title").textContent = st.take > 1 ? `Take ${st.take} · take ${st.take - 1} sent back: ${why}` : "The moment";
+      const why = (st.notes || []).at(-1), prev = (st.rejected || []).at(-1);
+      if (st.take > 1) {  // the rejected take stays one click away, in case it's good enough
+        const t = $("title");
+        t.textContent = `Take ${st.take} · `;
+        const a = Object.assign(document.createElement(prev ? "a" : "span"), { textContent: `take ${st.take - 1}` });
+        if (prev) Object.assign(a, { href: api(prev), target: "_blank", rel: "noopener", className: "took" });
+        t.append(a, ` sent back: ${why}`);
+      } else $("title").textContent = "The moment";
       const step = STEP[st.node];
       if (step) setStep(step);
       return;

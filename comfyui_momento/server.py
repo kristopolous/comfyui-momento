@@ -10,6 +10,7 @@ browser, and reading the profile picture and posts off it. They're saved under i
 Runs use the server's Comfy API key (COMFY_API_KEY) for Gemini and MiniMax Music 3.
 """
 import asyncio
+import base64
 import html.parser
 import json
 import logging
@@ -26,6 +27,7 @@ from aiohttp import web
 import folder_paths
 from server import PromptServer
 
+from . import pipeline
 from .graph import momento
 
 PAGE = Path(__file__).parent / "web" / "app.html"
@@ -100,6 +102,64 @@ async def _fetch_profile(name):
                 if r.status == 200:
                     (d / f"{target}.jpg").write_bytes(await r.read())
     return _profile(name)
+
+
+def _env(name):
+    """A setting from the environment, or from the .env file next to the ComfyUI folder."""
+    if os.environ.get(name):
+        return os.environ[name]
+    env = Path(folder_paths.base_path).parent / ".env"
+    if env.exists():
+        for line in env.read_text().splitlines():
+            if line.startswith(name + "="):
+                return line.split("=", 1)[1].strip()
+    return None
+
+
+async def _ask(system, text, images):
+    """One call to the planner model (an Ollama-API vision model). -> parsed JSON, or None."""
+    url, model = _env("PLANNER_URL"), _env("PLANNER_MODEL")
+    if not url or not model:
+        return None
+    body = {"model": model, "stream": False, "format": "json", "messages": [
+        {"role": "system", "content": system},
+        {"role": "user", "content": text, "images": [base64.b64encode(b).decode() for b in images]}]}
+    for _ in range(3):
+        try:
+            async with aiohttp.ClientSession() as s:
+                async with s.post(url, json=body, timeout=aiohttp.ClientTimeout(total=300)) as r:
+                    reply = (await r.json())["message"]["content"]
+            return json.loads(reply[reply.index("{"):reply.rindex("}") + 1])
+        except (aiohttp.ClientError, asyncio.TimeoutError, ValueError, KeyError):
+            pass
+    return None
+
+
+async def _review(video, post):
+    """The critic: the planner model looks at four frames of the take and the real photo. -> verdict dict"""
+    frames = []
+    for t in (0.5, 2.0, 3.5, 4.3):
+        proc = await asyncio.create_subprocess_exec(
+            "ffmpeg", "-v", "error", "-ss", str(t), "-i", str(video), "-frames:v", "1", "-vf", "scale=-2:384",
+            "-f", "image2", "-c:v", "mjpeg", "-", stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
+        out, _ = await proc.communicate()
+        if out:
+            frames.append(out)
+    if not frames:
+        return {"pass": True, "score": None, "problem": ""}
+    verdict = await _ask(pipeline.CRITIC, "Review this take.", frames + [Path(post).read_bytes()])
+    return {"pass": bool((verdict or {}).get("pass", True)), "score": (verdict or {}).get("score"),
+            "problem": str((verdict or {}).get("problem") or "")}
+
+
+async def _plan(picture, post):
+    """The planner plans the moment (PLANNER_URL, PLANNER_MODEL). None if unset or it fails."""
+    root = Path(folder_paths.get_input_directory())
+    plan = await _ask(pipeline.PLAN, "Left: the profile picture. Right: the photo they posted. Plan the moment.",
+                      [(root / p).read_bytes() for p in (picture, post)])
+    if plan and all(plan.get(k) for k in ("scene", "action", "photographer", "soundscape")):
+        return plan
+    return None
 
 
 def _key():
@@ -182,8 +242,15 @@ async def run(request):
 
 async def _shoot(picture, post, job, key, camera="smartphone"):
     """Queue one take; every take is different (a new seed). -> (prompt id, error)"""
-    graph = momento(picture, post, seed=random.randrange(2**31), angle="wide", prefix=f"momento/{job}",
-                    camera=camera)
+    plan = await _plan(picture, post)
+    if plan:  # the 3D pipeline, with a camera move every take
+        have = folder_paths.get_filename_list("diffusion_models")
+        graph = pipeline.build(picture, post, plan, seed=random.randrange(2**31), prefix=f"momento/{job}",
+                               move=random.choice(list(pipeline.MOVES)), camera=camera,
+                               h3_unet=next((u for u in pipeline.H3_UNETS if u in have), pipeline.H3_UNETS[0]))
+    else:  # no planner configured: the original single graph
+        graph = momento(picture, post, seed=random.randrange(2**31), angle="wide", prefix=f"momento/{job}",
+                        camera=camera)
     # a client_id makes ComfyUI track the running node (last_node_id), which /momento/status reports
     body = {"prompt": graph, "client_id": f"momento-{job}", "extra_data": {"api_key_comfy_org": key}}
     async with aiohttp.ClientSession() as s:
@@ -199,7 +266,7 @@ async def status(request):
     job = JOBS.get(request.match_info["id"]) or {"pid": request.match_info["id"], "take": 1, "notes": []}
     pid = job["pid"]
     port = PromptServer.instance.port
-    takes = {"take": job["take"], "notes": job["notes"]}
+    takes = {"take": job["take"], "notes": job["notes"], "rejected": job.get("rejected", [])}
     async with aiohttp.ClientSession() as s:
         async with s.get(f"http://127.0.0.1:{port}/history/{pid}") as r:
             hist = (await r.json()).get(pid)
@@ -226,13 +293,27 @@ async def status(request):
                 verdict = json.loads(text[7:])
             elif text.startswith("THE SHOT"):
                 plan = text
+    if not verdict and video and job.get("args"):  # the 3D pipeline has no review node: the planner reviews it
+        seen = job.setdefault("seen", {}).get(pid)
+        if seen:
+            verdict = seen[3]
+        else:
+            q = dict(p.split("=", 1) for p in video.split("?", 1)[1].split("&"))
+            path = Path(folder_paths.get_output_directory()) / q["subfolder"] / q["filename"]
+            verdict = await _review(path, Path(folder_paths.get_input_directory()) / job["args"][1])
+    # every finished take, by prompt id (the page polls this more than once per take)
+    rank = (verdict.get("score") or 0) + (10 if verdict.get("pass", True) else 0)
+    job.setdefault("seen", {})[pid] = (rank, video, plan, verdict)
     if not verdict.get("pass", True) and job.get("args") and job["take"] < TAKES:
         # the critic sent it back: reshoot with a new seed, and say why
         new, err = await _shoot(*job["args"])
         if not err:
             job["notes"].append(verdict.get("problem") or "not good enough")
+            job.setdefault("rejected", []).append(video)  # still watchable: "eh, good enough" is allowed
             job["take"] += 1
             job["pid"] = new
             return web.json_response({"state": "running", "node": "Reshoot", "take": job["take"],
-                                      "notes": job["notes"]})
+                                      "notes": job["notes"], "rejected": job["rejected"]})
+    # done: show the highest-rated take, which isn't always the last one
+    _, video, plan, verdict = max(job["seen"].values(), key=lambda t: t[0])
     return web.json_response({"state": "done", "video": video, "plan": plan, "review": verdict, **takes})
