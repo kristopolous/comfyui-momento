@@ -112,14 +112,15 @@ or put `COMFY_API_KEY=...` in a `.env` file next to the ComfyUI folder. **A** ne
 ```bash
 COMFY_URL=http://<gpu-host>:8188 \
 PLANNER_URL=http://<ollama-host>:11434/api/chat PLANNER_MODEL=qwen3-vl \
-CAMERA=dslr FORCE_MOVE=1 \
+CAMERA=dslr \
 python scripts/local.py --hires profile.jpg post1.jpg post2.jpg
 ```
 
 The output for each post is `out/<post>_local<N>.mp4`, with every step's images in `out/steps/`.
 
 - `CAMERA=smartphone|dslr` sets what the photographer holds.
-- `FORCE_MOVE=1` always uses a camera move, never a still camera.
+- Every take has a camera move through the 3D scene (dolly in, orbit or crane down). `ALLOW_STILL=1` also allows a
+  still camera.
 - `TAKES=2` sets how many takes the critic picks from.
 - `--hires` gives 448×768, and `RES=576x1024` goes bigger on a 48 GB GPU.
 - If only another machine can reach the planner, `PLANNER=<ssh host>` calls it through that machine.

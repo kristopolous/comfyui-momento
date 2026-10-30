@@ -219,7 +219,8 @@ def take(profile_up, post_up, profile, post, plan, closeup, n, out):
     name = Path(post).stem
     tag = f"{name}_{os.environ.get('TAG', 'local')}{'_dslr' if CAMERA == 'dslr' else ''}{n}"
     t = time.time()
-    moves = list(geo.MOVES) if os.environ.get("FORCE_MOVE") else [None, *geo.MOVES]  # FORCE_MOVE: never still
+    # a camera move by default (it looks much better); ALLOW_STILL=1 lets a take keep the camera still
+    moves = [None, *geo.MOVES] if os.environ.get("ALLOW_STILL") else list(geo.MOVES)
     move = None if closeup else random.choice(moves)  # variety: a still bystander or a camera move
     print(f"[{tag}] camera: {move or 'still'}", flush=True)
     files = run(graph(profile_up, post_up, plan, random.randrange(2**31), f"momento/{tag}", closeup, move))
