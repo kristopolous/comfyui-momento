@@ -62,6 +62,8 @@
   .sheet { display: flex; max-width: 920px; width: 100%; max-height: calc(100vh - 32px); background: #000; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
   .stage { position: relative; flex: none; width: min(56vh, 100%); aspect-ratio: 9 / 16; background: #000; }
   .stage img, .stage video { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; }
+  .sheet.wide { flex-direction: column; max-width: min(1100px, calc((100vh - 220px) * 16 / 9)); }
+  .sheet.wide .stage { width: 100%; aspect-ratio: 16 / 9; }
   .stage .scan { position: absolute; inset: 0; background: linear-gradient(transparent 40%, rgba(255,196,64,.18) 50%, transparent 60%);
     background-size: 100% 300%; animation: scan 2.2s linear infinite; display: none; }
   .working .stage .scan { display: block; }
@@ -156,6 +158,10 @@
           <label><input type="radio" name="camera" value="smartphone" checked><span>📱 Phone</span></label>
           <label><input type="radio" name="camera" value="dslr"><span>📷 DSLR</span></label>
         </div>
+        <div class="holds" title="Frame">
+          <label><input type="radio" name="frame" value="portrait" checked><span>▯</span></label>
+          <label><input type="radio" name="frame" value="landscape"><span>▭</span></label>
+        </div>
         <button class="primary" id="make">Make the moment</button><a id="save" download>Save</a>
       </div>
     </div>
@@ -247,7 +253,7 @@ function reset() {
   const v = $("video");
   v.pause(); v.removeAttribute("src"); v.load(); v.style.display = "none";
   $("still").style.display = "block";
-  $("moment").querySelector(".sheet").classList.remove("working", "done-state");
+  $("moment").querySelector(".sheet").classList.remove("working", "done-state", "wide");
   $("moment-error").textContent = $("elapsed").textContent = "";
   $("make").disabled = false; $("make").textContent = "Make the moment"; $("make").style.display = "";
   $("title").textContent = "The moment";
@@ -269,6 +275,7 @@ async function make() {
   const form = new FormData();
   form.append("name", profile.name); form.append("post", current);
   form.append("camera", document.querySelector("input[name=camera]:checked").value);
+  form.append("frame", document.querySelector("input[name=frame]:checked").value);
   let id;
   try {
     const r = await fetch(api("momento/run"), { method: "POST", body: form });
@@ -317,6 +324,7 @@ async function make() {
     $("make").style.display = "none";
     $("save").href = api(st.video);
     const v = $("video");
+    v.onloadedmetadata = () => sheet.classList.toggle("wide", v.videoWidth > v.videoHeight);  // landscape takes
     v.src = api(st.video);
     v.style.display = "block"; $("still").style.display = "none";
     v.play().catch(() => { v.controls = true; });

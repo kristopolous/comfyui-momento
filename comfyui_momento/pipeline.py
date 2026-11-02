@@ -26,6 +26,8 @@ PLAN = """Left image: someone's profile picture. Right image: a photo they poste
 {"scene": "<one sentence: the place, the light, and the subject of the photo (who or what, what they wear)>",
  "action": "<one sentence: what the subject does over four seconds, ending in exactly the pose or instant the photo
    froze. Active, never posing.>",
+ "before": "<one sentence: the subject a second BEFORE the photo, in a clearly different pose or position, moving
+   toward the photo's instant (a singer still crouched before throwing her arm up; a bus still down the street)>",
  "photographer": "<one short phrase: the person in the profile picture (or, if it isn't a person, an anonymous
    everyday person whose look fits the place): hair, build, and clothes that fit the place of the photo>",
  "soundscape": "<1-4 sentences of the place's real sound only: ambient sound, physical action sounds and non-verbal
@@ -43,7 +45,12 @@ real photo's place and subject; text or watermarks. Score how good a take it is 
 {"pass": true or false, "score": 1-10, "problem": "<the worst problem in one short sentence, or empty>"}"""
 
 # the bystander's camera, in the post's 3D space (metric; the photographer stands at the origin, facing -z)
-LENS, TARGET, START = 62.0, (0.0, -0.1, -4.0), (-0.4, 0.1, 1.7)
+LENS, TARGET, START = 62.0, (0.0, -0.1, -4.0), (-0.4, 0.1, 1.7)  # LENS: vertical fov for a portrait frame
+
+
+def lens(width, height):
+    """Vertical fov: 62 degrees for portrait; a landscape frame gets a wider view (about 66 degrees across)."""
+    return LENS if height >= width else 42.0
 
 
 def orbit(eye, degrees):
@@ -60,9 +67,11 @@ MOVE_WORDS = {"dolly in": "a slow dolly in from further back", "orbit": "a slow 
 # what the photographer holds (the page's Phone / DSLR toggle)
 CAMERAS = {
     "smartphone": dict(hold="holding a phone up in both hands", sheet="hold a phone up at eye level in both hands",
-                       act="holds the phone up, aimed at the subject, and taps the shutter at the end",
+                       ready="holding a phone down at chest height in one hand, about to raise it",
+                       act="raises the phone from chest height, aims it at the subject and taps the shutter at the end",
                        box="phone: held up in both hands, aimed at the subject"),
-    "dslr": dict(hold="holding a DSLR camera with a lens up to their eye", sheet="hold a DSLR camera with a zoom lens "
+    "dslr": dict(hold="holding a DSLR camera with a lens up to their eye", ready="holding a DSLR camera down at waist "
+                 "height by its grip, about to raise it to their eye", sheet="hold a DSLR camera with a zoom lens "
                  "up to their eye", act="raises the DSLR to their eye, frames the subject through the viewfinder and "
                  "presses the shutter at the end", box="camera: a DSLR with a lens, held up to the eye, aimed at the "
                  "subject"),
@@ -86,15 +95,17 @@ def project(point, eye, width, height, target=TARGET, fov=LENS):
     return (x + 1) / 2 * width, (1 - y) / 2 * height
 
 
-def layout(eye, camera, width, height):
-    """FLUX 3 layout rows: where the photographer and their camera are, seen from `eye`."""
+def layout(eye, camera, width, height, ready=False):
+    """FLUX 3 layout rows: where the photographer and their camera are, seen from `eye`. ready: the camera still
+    lowered, before it's raised to shoot."""
     def box(points):
-        px = [project(p, eye, width, height) for p in points]
+        px = [project(p, eye, width, height, fov=lens(width, height)) for p in points]
         clip = lambda v, m: max(0, min(1000, round(v / m * 1000)))  # noqa: E731
         return [clip(min(p[1] for p in px), height), clip(min(p[0] for p in px), width),
                 clip(max(p[1] for p in px), height), clip(max(p[0] for p in px), width)]
     body = [(x, y, z) for x in (-0.24, 0.24) for y in (0.14, -1.6) for z in (-0.1, 0.15)]
-    held = ([(x, y, z) for x in (-0.1, 0.1) for y in (-0.06, 0.08) for z in (-0.12, -0.3)] if camera == "dslr" else
+    held = ([(x, y, z) for x in (0.05, 0.25) for y in (-0.75, -0.55) for z in (-0.05, -0.25)] if ready else
+            [(x, y, z) for x in (-0.1, 0.1) for y in (-0.06, 0.08) for z in (-0.12, -0.3)] if camera == "dslr" else
             [(x, y, -0.42) for x in (-0.08, 0.12) for y in (-0.02, 0.16)])
     return [{"id": "photographer", "bbox": box(body), "desc": "the person from the character sheet, seen from behind "
                                                               "and a little from the side, facing into the scene"},
@@ -104,6 +115,7 @@ def layout(eye, camera, width, height):
 def build(profile, post, plan, seed, prefix, move, camera="smartphone", h3_unet=H3_UNETS[0], width=448, height=768,
           megapixels=0.4):
     """The whole take as one API-format graph. plan: the planner's JSON; move: a key of MOVES (or None).
+    Portrait by default (448x768); pass width=768, height=448 for landscape (a wider view, a wider lens).
     Open weights only; the server reviews the finished take with the planner model (CRITIC)."""
     g = Graph()
     cam = CAMERAS[camera]
@@ -134,12 +146,18 @@ def build(profile, post, plan, seed, prefix, move, camera="smartphone", h3_unet=
             "fill them seamlessly with more of the same place, same light, same lens. Keep everything else exactly as "
             "it is. No people in the foreground. " + plan["scene"])
 
-    def place(img, eye, s):
+    def place(img, eye, s, ready=False):
+        """The photographer from the sheet, placed from 3D, seen from behind. ready: a second earlier, camera still
+        lowered and the subject a beat before the instant, so the video has to animate the raise and the action."""
+        pose = (f"{cam['ready']}, looking at the subject" if ready else f"{cam['hold']}, aimed at the subject, "
+                "taking the photo")
+        subject = ""
         return klein("Add the person from ref_image_1's character sheet into ref_image_0 as the photographer: in the "
-                     f"foreground, seen from behind and slightly to the side, turned toward the subject, {cam['hold']}, "
-                     "aimed at the subject, taking a photo. Same hair and clothes as the sheet. Exactly one "
-                     "photographer, no other copies of them. Change nothing else in ref_image_0. "
-                     + plan["photographer"] + " " + json.dumps(layout(eye, camera, width, height)), [img, sheet()], s)
+                     "foreground, seen from directly behind and a little to the side, so we see their back and the "
+                     "back of their head, not their face; they face the subject squarely, "
+                     f"{pose}. Same hair and clothes as the sheet. Exactly one photographer, no other copies of them."
+                     f"{subject} Change nothing else in ref_image_0. " + plan["photographer"] + " "
+                     + json.dumps(layout(eye, camera, width, height, ready)), [img, sheet()], s)
 
     if plan.get("closeup"):  # no depth worth rebuilding: zoom out from the post itself, no camera move
         move = None
@@ -156,7 +174,7 @@ def build(profile, post, plan, seed, prefix, move, camera="smartphone", h3_unet=
 
         def view(eye):
             c = g.add("CreateCameraInfo", mode="look_at", **{f"mode.position_{a}": v for a, v in zip("xyz", eye)},
-                      target_x=TARGET[0], target_y=TARGET[1], target_z=TARGET[2], roll=0.0, fov=LENS, zoom=1.0,
+                      target_x=TARGET[0], target_y=TARGET[1], target_z=TARGET[2], roll=0.0, fov=lens(width, height), zoom=1.0,
                       camera_type="perspective")
             return g.add("RenderMesh", mesh=mesh(), mode="texture", width=width, height=height,
                          background="#000000", camera_info=c())(0)
@@ -164,21 +182,27 @@ def build(profile, post, plan, seed, prefix, move, camera="smartphone", h3_unet=
         instant = klein(fill, [view(START)], seed)
     if plan.get("closeup"):
         view = None
+    # two keyframes that differ: the camera lowered and the subject a beat before, then the instant itself
     placed = place(instant(), START, seed + 1)
-    opening = place(klein(fill, [view(MOVES[move])], seed + 2)(), MOVES[move], seed + 3) if move else None
+    base = klein(fill, [view(MOVES[move])], seed + 2)() if move else instant()
+    earlier = klein("Edit ref_image_0: change only the subject, to one second earlier: " + plan.get("before", "")
+                    + " Keep the place, the light, the camera position and everything else exactly the same.",
+                    [base], seed + 4)  # its own edit: bundled with the placement, Klein ignores it
+    opening = place(earlier(), MOVES[move] if move else START, seed + 3, ready=True)
 
     # MiniMax H3: the camera move into the instant; soundscape only (no tagged speakers, so nobody talks)
     model = g.add("LoraLoaderModelOnly", lora_name=H3_LORA, strength_model=1.0,
                   model=g.add("UNETLoader", unet_name=h3_unet, weight_dtype="default")())
     vae = g.add("VAELoader", vae_name=H3_VAE)
     avae = g.add("VAELoader", vae_name=H3_AUDIO_VAE)
-    camera_text = (f"The camera makes {MOVE_WORDS[move]}, moving through the real space of <Picture 1> to "
-                   f"<Picture 2>." if move else "Handheld bystander camera, nearly still.")
+    camera_text = (f"The camera makes {MOVE_WORDS[move]}, through the real space of the place." if move else
+                   "Handheld bystander camera, nearly still.")
     text = (f"integrated_multimodal_description: {camera_text} The photographer in the foreground, seen from behind, "
-            f"{cam['act']}. There is exactly one photographer. The subject is in motion and ends exactly in the moment "
-            f"of the last frame: {plan['action']} {plan['scene']}\noverall_soundscape: {plan['soundscape']}"
-            "\nnon_diegetic_music: N/A")
-    ends = {"first_frame": opening(), "last_frame": placed()} if opening else {"last_frame": placed()}
+            f"{cam['act']}: they start with the camera lowered as in <Picture 1> and end with it raised as in "
+            "<Picture 2>. There is exactly one photographer. The subject moves from their pose in <Picture 1> into "
+            f"exactly the moment of <Picture 2>: {plan['action']} {plan['scene']}"
+            f"\noverall_soundscape: {plan['soundscape']}\nnon_diegetic_music: N/A")
+    ends = {"first_frame": opening(), "last_frame": placed()}
     cond = g.add("MiniMaxH3ImageToVideo", prompt=text, width=width, height=height, length=H3_FRAMES, vae=vae(),
                  clip=g.add("CLIPLoader", clip_name=H3_CLIP, type="minimax", device="default")(), **ends)
     out = g.add("SamplerCustomAdvanced", noise=g.add("RandomNoise", noise_seed=seed)(),

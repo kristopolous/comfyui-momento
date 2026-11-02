@@ -232,7 +232,8 @@ async def run(request):
         return web.json_response({"error": "No such post."}, status=400)
     rel = lambda p: Path(p).relative_to(folder_paths.get_input_directory()).as_posix()  # noqa: E731
     camera = "dslr" if form.get("camera") == "dslr" else "smartphone"
-    args = (rel(picture), rel(posts[i]), job, key, camera)
+    wide = form.get("frame") == "landscape"
+    args = (rel(picture), rel(posts[i]), job, key, camera, wide)
     pid, err = await _shoot(*args)
     if err:
         return web.json_response({"error": err}, status=500)
@@ -240,14 +241,15 @@ async def run(request):
     return web.json_response({"id": pid})
 
 
-async def _shoot(picture, post, job, key, camera="smartphone"):
+async def _shoot(picture, post, job, key, camera="smartphone", wide=False):
     """Queue one take; every take is different (a new seed). -> (prompt id, error)"""
     plan = await _plan(picture, post)
     if plan:  # the 3D pipeline, with a camera move every take
         have = folder_paths.get_filename_list("diffusion_models")
         graph = pipeline.build(picture, post, plan, seed=random.randrange(2**31), prefix=f"momento/{job}",
                                move=random.choice(list(pipeline.MOVES)), camera=camera,
-                               h3_unet=next((u for u in pipeline.H3_UNETS if u in have), pipeline.H3_UNETS[0]))
+                               h3_unet=next((u for u in pipeline.H3_UNETS if u in have), pipeline.H3_UNETS[0]),
+                               **(dict(width=768, height=448) if wide else {}))
     else:  # no planner configured: the original single graph
         graph = momento(picture, post, seed=random.randrange(2**31), angle="wide", prefix=f"momento/{job}",
                         camera=camera)

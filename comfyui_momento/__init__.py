@@ -124,8 +124,16 @@ class MomentoReveal(io.ComfyNode):
         img = post[:1].movedim(-1, 1)
         scale = min(w / img.shape[3], h / img.shape[2])
         nh, nw = max(1, round(img.shape[2] * scale)), max(1, round(img.shape[3] * scale))
+        src = img
         img = F.interpolate(img, size=(nh, nw), mode="area").movedim(1, -1)[0].to(frames)
-        card = torch.ones((h, w, 3), dtype=frames.dtype, device=frames.device)
+        # behind it, the same photo scaled to fill the frame, blurred and darkened (landscape frames show this)
+        cover = max(w / src.shape[3], h / src.shape[2])
+        ch, cw = max(h, round(src.shape[2] * cover)), max(w, round(src.shape[3] * cover))
+        back = F.interpolate(src, size=(ch, cw), mode="area")[:, :, (ch - h) // 2:(ch - h) // 2 + h,
+                                                             (cw - w) // 2:(cw - w) // 2 + w]
+        back = F.interpolate(F.interpolate(back, scale_factor=1 / 24, mode="area"), size=(h, w), mode="bilinear",
+                             align_corners=False)
+        card = (back[0].movedim(0, -1) * 0.45).to(frames).contiguous()
         y, x = (h - nh) // 2, (w - nw) // 2
         card[y:y + nh, x:x + nw] = img
         n = max(1, round(hold * fps))
