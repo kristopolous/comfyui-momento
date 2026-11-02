@@ -4,7 +4,7 @@
 
 Live: **https://9ol.es/momento-demo/** · Demo video: **https://9ol.es/momento-video**
 
-![The page: type a name, the public profile opens, tap a post, choose phone or DSLR](docs/app.png)
+![The photographer raises her phone, the singer hits the pose, the shutter fires, and it cuts to the real post](docs/hero.gif)
 
 Momento opens a public Instagram profile and shows its most recent posts as a grid. Tap one and it films the moment
 that photo was taken, from a bystander's point of view. The person in the profile picture stands where the camera
@@ -141,8 +141,12 @@ This uses Gemini, FLUX 3 Image, MiniMax H3 and LTX-2.5's in/outpainting IC-LoRA.
 by side, and Gemini keeps the best one.
 
 **C. The page:** open `http://<comfy-host>:8188/momento`, type an Instagram name, tap a post, choose
-📱 Phone or 📷 DSLR, and press **Make the moment**. A Gemini critic reviews each take and reshoots rejected ones.
+📱 Phone or 📷 DSLR, ▯ portrait (the default) or ▭ landscape, and press **Make the moment**. With `PLANNER_URL` and
+`PLANNER_MODEL` set (any Ollama-API vision model, e.g. Qwen3-VL), that model plans the moment, reviews each take
+against the real post, and reshoots rejected ones; the best-scoring take wins.
 In ComfyUI itself, open `workflows/momento.json` (App Mode).
+
+![The page: type a name, the public profile opens, tap a post, choose phone or DSLR](docs/app.png)
 
 Use photos the person actually took. Posts they appear in themselves don't fit the idea.
 
