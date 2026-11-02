@@ -4,7 +4,7 @@
 
 Live: **https://9ol.es/momento-demo/** · Demo video: **https://9ol.es/momento-video**
 
-![Chris Burkard's real Instagram profile zooms into his helicopter post, then the moment he took it: he raises a DSLR as the surfers walk off from the Mi-8, the shutter fires, and it cuts to the real photo](docs/hero.gif)
+![Chris Burkard's real Instagram profile zooms into his helicopter post. Then his profile header stays on top while, below, the man from his profile picture raises a DSLR as the surfers walk off from the Mi-8; the shutter fires, and it cuts to the real photo](docs/hero.gif)
 
 Momento opens a public Instagram profile and shows its most recent posts as a grid. Tap one and it films the moment
 that photo was taken, from a bystander's point of view. The person in the profile picture stands where the camera
