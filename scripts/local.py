@@ -52,6 +52,10 @@ H3 = dict(unet=os.environ.get("H3_UNET", "minimax_h3_fl2va_pruned_int8_convrot.s
           lora="minimax_h3_fl2v_turbo_8step_v1.0_comfyui_bf16.safetensors",
           vae="minimax_h3_video_vae_int8_convrot.safetensors", audio_vae="minimax_h3_audio_vae_fp32.safetensors",
           clip="qwen3vl_32b_minimax_h3_int8_convrot.safetensors")
+GAP = "#FF00FF"  # what RenderMesh draws where the camera sees past the photo; the fill outpaints it
+FLEX = os.environ.get("FLEX") == "1"  # Pika H3 Flex: directed camera moves, Comfy's 6-step recipe
+if FLEX:
+    H3["lora"] = "pika_h3_flex_fl2va_v1_bf16.safetensors"
 
 SHEET = ("Character turnaround sheet, four full-body views side by side on a plain light grey studio background: "
          "front, three-quarter front, side profile, and back. Same face, hair, build and clothes in every view. In the "
@@ -129,22 +133,25 @@ def graph(profile, post, plan, seed, prefix, closeup, move=None):
                     **{f"mode.position_{a}": v for a, v in zip("xyz", geo.START)},
                     target_x=geo.TARGET[0], target_y=geo.TARGET[1], target_z=geo.TARGET[2], roll=0.0, fov=geo.LENS,
                     zoom=1.0, camera_type="perspective")
-        view = g.add("RenderMesh", mesh=mesh(), mode="texture", width=W, height=H, background="#000000",
+        view = g.add("RenderMesh", mesh=mesh(), mode="texture", width=W, height=H, background=GAP,
                      camera_info=cam())
         if move:  # the opening view of the camera move, from the same 3D place
             cam0 = g.add("CreateCameraInfo", mode="look_at",
                          **{f"mode.position_{a}": v for a, v in zip("xyz", geo.MOVES[move])},
                          target_x=geo.TARGET[0], target_y=geo.TARGET[1], target_z=geo.TARGET[2], roll=0.0,
                          fov=geo.LENS, zoom=1.0, camera_type="perspective")
-            view0 = g.add("RenderMesh", mesh=mesh(), mode="texture", width=W, height=H, background="#000000",
+            view0 = g.add("RenderMesh", mesh=mesh(), mode="texture", width=W, height=H, background=GAP,
                           camera_info=cam0())
-        instant = klein(g, "ref_image_0 is a bystander's view of a real place, with black gaps where the camera sees "
-                           "around things: fill them seamlessly with more of the same place, same light, same lens. "
-                           "Keep everything else exactly as it is. No people in the foreground. " + plan["scene"],
+        instant = klein(g, "ref_image_0 is a bystander's view of a real place. The solid magenta areas are where the "
+                           "camera sees past what was photographed: they are missing, not part of the place. Extend the "
+                           "place outward into every magenta area so it fills the whole frame, with more of the same "
+                           "place, same light, same lens: no border, no frame, no magenta left. Keep everything else "
+                           "exactly as it is. No people in the foreground. " + plan["scene"],
                         [view(0)], seed)
-    fill = ("ref_image_0 is a bystander's view of a real place, with black gaps where the camera sees around things: "
-            "fill them seamlessly with more of the same place, same light, same lens. Keep everything else exactly as "
-            "it is. No people in the foreground. " + plan["scene"])
+    fill = ("ref_image_0 is a bystander's view of a real place. The solid magenta areas are where the camera sees past "
+            "what was photographed: they are missing, not part of the place. Extend the place outward into every magenta "
+            "area so it fills the whole frame, with more of the same place, same light, same lens: no border, no frame, "
+            "no magenta left. Keep everything else exactly as it is. No people in the foreground. " + plan["scene"])
 
     def place(img, eye, s_):
         return klein(g, "Add the person from ref_image_1's character sheet into ref_image_0 as the photographer: in "
@@ -161,6 +168,8 @@ def graph(profile, post, plan, seed, prefix, closeup, move=None):
                    + plan["photographer"] + rows(geo.layout(camera=CAMERA)),
                    [instant(), sheet()], seed + 1)
     g.add("SaveImage", images=g.add("ImageBatch", image1=instant(), image2=placed())(), filename_prefix=prefix + "_keys")
+    if opening:
+        g.add("SaveImage", images=opening(), filename_prefix=prefix + "_open")
     # MiniMax H3, open weights: the seconds before, ending on the placed instant; soundscape only, nobody speaks
     model = g.add("LoraLoaderModelOnly", lora_name=H3["lora"], strength_model=1.0,
                   model=g.add("UNETLoader", unet_name=H3["unet"], weight_dtype="default")())
@@ -180,8 +189,9 @@ def graph(profile, post, plan, seed, prefix, closeup, move=None):
                  clip=g.add("CLIPLoader", clip_name=H3["clip"], type="minimax", device="default")(), vae=vae())
     out = g.add("SamplerCustomAdvanced", noise=g.add("RandomNoise", noise_seed=seed)(),
                 guider=g.add("BasicGuider", model=model(), conditioning=cond(0))(),
-                sampler=g.add("KSamplerSelect", sampler_name="res_multistep")(),
-                sigmas=g.add("BasicScheduler", model=model(), scheduler="simple", steps=8, denoise=1.0)(),
+                sampler=g.add("KSamplerSelect", sampler_name="lcm" if FLEX else "res_multistep")(),
+                sigmas=g.add("ManualSigmas", sigmas="1.0, 0.972973, 0.923077, 0.8, 0.571429, 0.333333, 0.0")() if FLEX
+                else g.add("BasicScheduler", model=model(), scheduler="simple", steps=8, denoise=1.0)(),
                 latent_image=cond(1))
     video = g.add("CreateVideo", fps=float(FPS), images=g.add("VAEDecode", samples=out(0), vae=vae())(),
                   audio=g.add("VAEDecodeAudio", samples=out(0), vae=avae())())
@@ -221,14 +231,17 @@ def take(profile_up, post_up, profile, post, plan, closeup, n, out):
     t = time.time()
     # a camera move by default (it looks much better); ALLOW_STILL=1 lets a take keep the camera still
     moves = [None, *geo.MOVES] if os.environ.get("ALLOW_STILL") else list(geo.MOVES)
-    move = None if closeup else random.choice(moves)  # variety: a still bystander or a camera move
+    move = None if closeup else os.environ.get("MOVE") or random.choice(moves)  # variety, or MOVE= to pin it
     print(f"[{tag}] camera: {move or 'still'}", flush=True)
-    files = run(graph(profile_up, post_up, plan, random.randrange(2**31), f"momento/{tag}", closeup, move))
+    seed = int(os.environ.get("SEED") or random.randrange(2**31))  # SEED= to repeat a take
+    files = run(graph(profile_up, post_up, plan, seed, f"momento/{tag}", closeup, move))
     od = Path(out) / "steps"
     od.mkdir(parents=True, exist_ok=True)
     fetch(files["sheet"][0], od / f"{tag}_sheet.png")
     for i, f in enumerate(files["keys"]):
         fetch(f, od / f"{tag}_key{i}.png")
+    for f in files.get("open", []):
+        fetch(f, od / f"{tag}_open.png")
     raw, final = od / f"{tag}_raw.mp4", Path(out) / f"{tag}.mp4"
     fetch(files["final"][0], raw)
     reveal(str(raw), post, str(final))

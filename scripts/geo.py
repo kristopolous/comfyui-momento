@@ -14,6 +14,7 @@ that point, so where the photographer is and which way they face are facts, not 
 """
 import json
 import math
+import os
 import random
 import sys
 import time
@@ -31,7 +32,9 @@ UNION = "ltx-2.3-22b-ic-lora-union-control-ref0.5.safetensors"
 POST_FOV = 85.0  # Depth Anything 3's default intrinsics, as a vertical fov for a portrait post (calibrated)
 LENS = 62.0  # the bystander camera's vertical fov
 TARGET = (0.0, -0.1, -4.0)  # what everyone looks at: the scene, in front of the photographer
-START = (-0.4, 0.1, 1.7)  # the bystander: behind and a little left of the photographer, who lands in the right half
+PULL_BACK = float(os.environ.get("PULL_BACK", "1.5"))  # how far back the bystander stands (1 = the old 1.7 m)
+back = lambda x, y, z: (x * PULL_BACK, y, z * PULL_BACK)  # noqa: E731
+START = back(-0.4, 0.1, 1.7)  # the bystander: behind and a little left of the photographer, who lands in the right half
 END = (0.22, 0.12, 0.38)  # over the photographer's right shoulder
 
 PLAN = """Left image: someone's profile picture. Right image: a photo they posted. Reply with JSON only:
@@ -114,9 +117,9 @@ def orbit(eye, degrees):
 
 # camera moves through the post's 3D space: where the take starts; it always ends at START
 MOVES = {
-    "dolly in": (-0.55, 0.15, 3.0),          # from further back, pushing in behind the photographer
+    "dolly in": back(-0.55, 0.15, 3.0),      # from further back, pushing in behind the photographer
     "orbit": orbit(START, 28),               # swinging around from their right (a left orbit loses them)
-    "crane down": (-0.35, 1.3, 2.1),         # from above, settling to eye level
+    "crane down": back(-0.35, 1.3, 2.1),     # from above, settling to eye level
 }
 MOVE_WORDS = {"dolly in": "a slow dolly in from further back", "orbit": "a slow arc around the photographer",
               "crane down": "a slow crane down from above"}
