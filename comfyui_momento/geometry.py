@@ -149,8 +149,9 @@ class MomentoCameraPath(io.ComfyNode):
             node_id="MomentoCameraPath",
             display_name="Momento Camera Path",
             category="Momento",
-            description="The post's 3D place (plus the ground under the photographer) rendered as a depth video "
-                        "along the bystander's camera move. Feed it to MiniMax H3 Fun ControlNet-Union.",
+            description="The post's 3D place (plus the ground under the photographer) rendered along the "
+                        "bystander's camera move: as depth for MiniMax H3 Fun ControlNet-Union, or as a clay "
+                        "viewport for LTX-2.5 Layout-To-Render.",
             inputs=[
                 io.Mesh.Input("mesh"),
                 io.Combo.Input("move", options=MOVES, default=MOVES[0]),
@@ -158,12 +159,15 @@ class MomentoCameraPath(io.ComfyNode):
                 io.Int.Input("width", default=448, min=64, max=4096, step=32),
                 io.Int.Input("height", default=768, min=64, max=4096, step=32),
                 io.Boolean.Input("ground", default=True),
+                io.Combo.Input("render", options=["depth", "clay"], default="depth",
+                               tooltip="depth for MiniMax H3 Fun ControlNet; clay (a grey viewport render) for "
+                                       "LTX-2.5 Layout-To-Render"),
             ],
-            outputs=[io.Image.Output(display_name="depth")],
+            outputs=[io.Image.Output(display_name="video")],
         )
 
     @classmethod
-    def execute(cls, mesh, move, frames, width, height, ground=True) -> io.NodeOutput:
+    def execute(cls, mesh, move, frames, width, height, ground=True, render="depth") -> io.NodeOutput:
         from comfy_extras.nodes_gaussian_splat import _lookat_camera_info
         from comfy_extras.nodes_mesh_postprocess import RenderMesh
         from comfy_extras.nodes_save_3d import MergeMeshes
@@ -173,8 +177,60 @@ class MomentoCameraPath(io.ComfyNode):
         out = []
         for eye in camera_path(move, frames):
             cam = _lookat_camera_info(list(eye), list(P.TARGET), fov, "cpu")
-            out.append(RenderMesh.execute(mesh, "depth", width, height, "#000000", None, cam).args[0])
+            out.append(RenderMesh.execute(mesh, "depth" if render == "depth" else "solid", width, height,
+                                          "#000000" if render == "depth" else "#3a3a3a", None, cam).args[0])
         return io.NodeOutput(torch.cat(out, dim=0))
+
+
+# ground points around the photographer's feet (metres, on the ground plane): what the footage is tracked by
+GROUND = [(x, FEET, z) for x in (-0.45, 0.0, 0.45) for z in (-0.5, 0.05, 0.5)]
+
+
+def track_back(frames, points, optical_flow):
+    """Follow `points` (pixels, in the LAST frame) backwards through `frames` (T, H, W, 3) with RAFT.
+    -> (T, P, 2) positions; the last row is `points`."""
+    import comfy.model_management
+    from comfy_extras.void_noise_warp import RaftOpticalFlow
+    raft = RaftOpticalFlow(optical_flow.model, device=comfy.model_management.get_torch_device())
+    T, H, W = frames.shape[0], frames.shape[1], frames.shape[2]
+    out = np.zeros((T, len(points), 2), dtype=np.float32)
+    cur = np.asarray(points, dtype=np.float32)
+    out[-1] = cur
+    for t in range(T - 1, 0, -1):
+        flow = raft(frames[t].permute(2, 0, 1), frames[t - 1].permute(2, 0, 1)).float().cpu().numpy()  # (2, H, W)
+        xs = np.clip(cur[:, 0], 0, W - 1)
+        ys = np.clip(cur[:, 1], 0, H - 1)
+        x0, y0 = np.floor(xs).astype(int), np.floor(ys).astype(int)
+        x1, y1 = np.minimum(x0 + 1, W - 1), np.minimum(y0 + 1, H - 1)
+        fx, fy = xs - x0, ys - y0
+
+        def at(c):
+            return ((flow[c, y0, x0] * (1 - fx) + flow[c, y0, x1] * fx) * (1 - fy) +
+                    (flow[c, y1, x0] * (1 - fx) + flow[c, y1, x1] * fx) * fy)
+        cur = cur + np.stack([at(0), at(1)], axis=1)
+        out[t - 1] = cur
+    return out
+
+
+def fit_shift_scale(src, dst):
+    """Least-squares uniform scale + translation taking src points to dst points. -> (s, tx, ty)"""
+    src, dst = np.asarray(src, np.float64), np.asarray(dst, np.float64)
+    ms, md = src.mean(0), dst.mean(0)
+    a, b = src - ms, dst - md
+    s = float((a * b).sum() / max((a * a).sum(), 1e-9))
+    s = min(max(s, 0.7), 1.4)  # a camera move between neighbouring frames can't do more than this
+    t = md - s * ms
+    return s, float(t[0]), float(t[1])
+
+
+def plant(per, ground_proj, tracked):
+    """Move each frame's projected skeleton and camera so the ground around the feet sits where the footage has it."""
+    planted = []
+    for (j2, held), g, tr in zip(per, ground_proj, tracked):
+        s, tx, ty = fit_shift_scale(g, tr)
+        f = lambda p: (s * p[0] + tx, s * p[1] + ty)  # noqa: E731
+        planted.append(({n: f(p) for n, p in j2.items()}, f(held)))
+    return planted
 
 
 class MomentoPhotographer(io.ComfyNode):
@@ -193,13 +249,25 @@ class MomentoPhotographer(io.ComfyNode):
                 io.Int.Input("frames", default=107, min=5, max=1000),
                 io.Int.Input("width", default=448, min=64, max=4096, step=32),
                 io.Int.Input("height", default=768, min=64, max=4096, step=32),
+                io.Image.Input("footage", optional=True,
+                               tooltip="The filmed place (pass 1). With an optical flow model, the photographer is "
+                                       "planted on its ground: tracked back from the last frame, where the 3D is exact."),
+                io.Custom("OPTICAL_FLOW").Input("optical_flow", optional=True),
             ],
             outputs=[io.Image.Output(display_name="pose"), io.Mask.Output(display_name="mask")],
         )
 
     @classmethod
-    def execute(cls, move, camera, frames, width, height) -> io.NodeOutput:
+    def execute(cls, move, camera, frames, width, height, footage=None, optical_flow=None) -> io.NodeOutput:
         per = frame_joints(move, camera, frames, width, height)
+        if footage is not None and optical_flow is not None and footage.shape[0] >= frames:
+            path = camera_path(move, frames)
+            ground_proj = [[project(p, eye, width, height) for p in GROUND] for eye in path]
+            clip = footage[:frames]
+            if clip.shape[1] != height or clip.shape[2] != width:
+                clip = torch.nn.functional.interpolate(clip.movedim(-1, 1), size=(height, width), mode="bilinear",
+                                                       align_corners=False).movedim(1, -1)
+            per = plant(per, ground_proj, track_back(clip, ground_proj[-1], optical_flow))
         pose = _images([draw_pose(j2, width, height) for j2, _ in per])
         mask = torch.from_numpy(np.stack([np.asarray(draw_mask(j2, held, width, height), dtype=np.float32) / 255.0
                                           for j2, held in per]))

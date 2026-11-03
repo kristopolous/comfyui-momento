@@ -254,7 +254,8 @@ def graph_control(g, mesh, instant, sheet, plan, seed, prefix, move):
 
     # the camera path through the post's 3D place (and the ground under the photographer), as depth
     mv = move or "still"
-    depth = g.add("MomentoCameraPath", mesh=mesh(), move=mv, frames=H3_FRAMES, width=W, height=H, ground=True)(0)
+    depth = g.add("MomentoCameraPath", mesh=mesh(), move=mv, frames=H3_FRAMES, width=W, height=H, ground=True,
+                  render="depth")(0)
     g.add("SaveAnimatedWEBP", images=depth, fps=float(FPS), lossless=False, quality=60, method="default",
           filename_prefix=prefix + "_depth")
 
@@ -280,7 +281,10 @@ def graph_control(g, mesh, instant, sheet, plan, seed, prefix, move):
           filename_prefix=prefix + "_place", format="mp4", codec="h264")
 
     # pass 2: the photographer, inpainted under the projected skeleton and mask
-    who_3d = g.add("MomentoPhotographer", move=mv, camera=CAMERA, frames=H3_FRAMES, width=W, height=H)
+    # planted on pass 1's own ground: RAFT tracks the ground round their feet back from the last frame
+    plant = {} if os.environ.get("PLANT") == "0" else dict(
+        footage=place(), optical_flow=g.add("OpticalFlowLoader", model_name="raft_large.pth")())
+    who_3d = g.add("MomentoPhotographer", move=mv, camera=CAMERA, frames=H3_FRAMES, width=W, height=H, **plant)
     pose, mask = (lambda: who_3d(0)), (lambda: who_3d(1))
     unet2 = g.add("UNETLoader", unet_name=REF2VA["unet"], weight_dtype="default")
     m2 = (g.add("LoraLoaderModelOnly", lora_name=REF2VA["lora"], strength_model=1.0, model=unet2()) if P2[1]
