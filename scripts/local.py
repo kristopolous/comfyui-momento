@@ -159,7 +159,7 @@ def graph(profile, post, plan, seed, prefix, closeup, move=None):
                     zoom=1.0, camera_type="perspective")
         view = g.add("RenderMesh", mesh=mesh(), mode="texture", width=W, height=H, background=GAP,
                      camera_info=cam())
-        if move:  # the opening view of the camera move, from the same 3D place
+        if move and not CONTROL:  # the opening view of the camera move, from the same 3D place
             cam0 = g.add("CreateCameraInfo", mode="look_at",
                          **{f"mode.position_{a}": v for a, v in zip("xyz", geo.MOVES[move])},
                          target_x=geo.TARGET[0], target_y=geo.TARGET[1], target_z=geo.TARGET[2], roll=0.0,
@@ -310,7 +310,8 @@ def graph_control(g, mesh, instant, sheet, plan, seed, prefix, move):
               format="mp4", codec="h264")
         g.add("SaveImage", filename_prefix=prefix + "_body",
               images=g.add("SAM3DBody_Render", pose_data=body(), width=W, height=H, background=picks(0),
-                           **{"render_style": "mesh", "render_style.shader": "default"})())
+                           **{"render_style": "mesh", "render_style.shader": "default", "render_style.opacity": 0.65,
+                              "render_style.person_palette_falloff": 0.6, "render_style.region": "full_body"})())
     return g
 
 
