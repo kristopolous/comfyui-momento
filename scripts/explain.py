@@ -4,8 +4,9 @@
 
 ASSETS_DIR holds one controlled take's pieces (local.py with CONTROL=1 EXPLAIN=1 saves them): post.jpg, depth.webp
 (Momento Camera Path), pose.mp4 (Momento Photographer), place.mp4 (pass 1), final.mp4 (pass 2), body3.png (SAM 3D
-Body's view), gate.json (Momento Gate's numbers), a prompted take for contrast (prompted.mp4), canvas screenshots
-(camera_path_closeup.jpg, gate_closeup.jpg, full_graph.jpg) and the narration, explain_1..5.wav.
+Body's view), gate.json (Momento Gate's numbers), a prompted take for contrast (prompted.mp4)
+and the narration, explain_1..4.wav. It ends on that prompted take beside a controlled take of the same photo
+(controlled_heli.mp4, gate_heli.json).
 """
 import json
 import subprocess
@@ -95,18 +96,18 @@ def main(src, out):
     gate = json.loads((src / "gate.json").read_text())
     last = gate[-1]
     clip = {k: frames(src / f) for k, f in (("prompted", "prompted.mp4"), ("depth", "depth.webp"),
-                                            ("pose", "pose.mp4"), ("place", "place.mp4"), ("final", "final.mp4"))}
-    post = Image.open(src / "post.jpg").convert("RGB")
+                                            ("pose", "pose.mp4"), ("place", "place.mp4"), ("final", "final.mp4"),
+                                            ("controlled", "controlled_heli.mp4"))}
     body = Image.open(src / "body3.png").convert("RGB")
-    shots = {k: Image.open(src / f"{k}.jpg").convert("RGB") for k in ("camera_path_closeup", "gate_closeup",
-                                                                      "full_graph")}
-    # the prompted take's measured miss, from the same gate (side-on, 25% of the frame off where it should be)
-    prompted_note = "measured: 47° off the shot,\nstanding 25% of the frame away"
+    fixed = json.loads((src / "gate_heli.json").read_text())[-1]  # the controlled Kamchatka take's own numbers
+    # the prompted take, measured by the same gate: side-on, a quarter of the frame from where it should stand
+    missed = {"deg": 47, "off": 0.25}
 
     def s1(t):
         c = Image.new("RGB", (W, H), BG)
         title(c, "Prompts can't place a person.", "a video model asked for “a photographer behind the camera”")
-        panel(c, at(clip["prompted"], t), (140, 120, 360, 520), "PROMPTED", RED, RED, prompted_note)
+        panel(c, at(clip["prompted"], t), (140, 120, 360, 520), "PROMPTED", RED, RED,
+              f"measured: {missed['deg']}° off the shot,\nstanding {missed['off'] * 100:.0f}% of the frame away")
         mark(ImageDraw.Draw(c), (430, 540), False, 64)
         d = ImageDraw.Draw(c)
         for i, line in enumerate(("The lens points at nothing.", "Turned side-on.", "Not where the camera stood.")):
@@ -115,60 +116,50 @@ def main(src, out):
 
     def s2(t):
         c = Image.new("RGB", (W, H), BG)
-        title(c, "Rebuild the photo in 3D. Fly the camera through it.")
-        panel(c, post, (40, 130, 300, 440), "THE POST", DIM)
-        panel(c, at(clip["depth"], t), (350, 120, 280, 470), "DEPTH ANYTHING 3", BLUE,
-              sub="the place + the ground,\nalong the dolly")
-        panel(c, shots["camera_path_closeup"], (650, 140, 600, 380), "MOMENTO CAMERA PATH → MINIMAX H3", GOLD,
-              sub="Fun ControlNet-Union 2.0 follows the depth")
+        title(c, "Rebuild it in 3D. Place them from the geometry.")
+        bones = at(clip["pose"], t)
+        over = Image.composite(bones, at(clip["place"], t).resize(bones.size),
+                               bones.convert("L").point(lambda v: 255 if v > 24 else 0))
+        for k, (im, label, color, sub) in enumerate((
+                (at(clip["depth"], t), "DEPTH ANYTHING 3", BLUE, "the place in 3D,\nalong the dolly"),
+                (over, "MOMENTO PHOTOGRAPHER", GOLD, "where the camera\nstood, facing its way"),
+                (at(clip["place"], t), "MINIMAX H3", PURPLE, "films the place\n(Fun ControlNet)"),
+                (at(clip["final"], t), "H3 REF2VA", PURPLE, "paints them in\n(FLUX 3 sheet)"))):
+            panel(c, im, (30 + k * 310, 110, 300, 480), label, color, sub=sub)
         return c
 
     def s3(t):
         c = Image.new("RGB", (W, H), BG)
-        title(c, "The photographer comes from the same geometry.")
-        boxes = [(60, 110, 360, 500), (460, 110, 360, 500), (860, 110, 360, 500)]
-        bones = at(clip["pose"], t)
-        over = Image.composite(bones, at(clip["place"], t).resize(bones.size),
-                               bones.convert("L").point(lambda v: 255 if v > 24 else 0))
-        panel(c, over, boxes[0], "MOMENTO PHOTOGRAPHER", GOLD, sub="3D skeleton, projected:\nback to us, camera up")
-        panel(c, at(clip["place"], t), boxes[1], "PASS 1 · MINIMAX H3", PURPLE, sub="the place, filmed\nalong the path")
-        panel(c, at(clip["final"], t), boxes[2], "PASS 2 · H3 REF2VA", PURPLE, sub="painted in from a\nFLUX 3 character sheet")
-        return c
-
-    def s4(t):
-        c = Image.new("RGB", (W, H), BG)
-        title(c, "Then measure every take.")
-        panel(c, body, (40, 110, 330, 520), "SAM 3D BODY", GREEN, sub="the body it reconstructs")
+        title(c, "Sam 3D Body checks every take.")
+        panel(c, body, (200, 110, 340, 520), "SAM 3D BODY", GREEN, sub="the body it reconstructs")
         d = ImageDraw.Draw(c)
         rows = [(f"{last['deg']:.0f}°", "off the shot's axis"), (f"+{last['hands_up_m'] * 100:.0f} cm", "camera at the eye"),
                 (f"{last['off'] * 100:.1f}%", "from where the 3D put them")]
         for i, (big, small) in enumerate(rows):
-            d.text((410, 170 + i * 92), big, font=font("Black", 44), fill=WHITE)
-            d.text((410, 222 + i * 92), small, font=font("Medium", 18), fill=GREY)
-        mark(d, (410, 452), True, 44)
-        d.text((462, 460), "SHIPS", font=font("Black", 40), fill=GREEN)
-        d.text((410, 512), "otherwise it's re-rolled", font=font("Medium", 18), fill=GREY)
-        panel(c, shots["gate_closeup"], (700, 150, 560, 400), "MOMENTO GATE", GOLD)
+            d.text((620, 170 + i * 92), big, font=font("Black", 44), fill=WHITE)
+            d.text((620, 222 + i * 92), small, font=font("Medium", 18), fill=GREY)
+        mark(d, (620, 452), True, 44)
+        d.text((672, 460), "SHIPS", font=font("Black", 40), fill=GREEN)
+        d.text((620, 512), "otherwise it's re-rolled", font=font("Medium", 18), fill=GREY)
         return c
 
-    def s5(t):
+    def s4(t):
         c = Image.new("RGB", (W, H), BG)
-        title(c, "One ComfyUI graph.", "70 nodes · open weights · runs as a Comfy App")
-        panel(c, shots["full_graph"], (40, 110, 1200, 520))
+        title(c, "Same photo. Same models.")
+        panel(c, at(clip["prompted"], t, 0.0), (170, 110, 400, 500), "PROMPTED", RED, RED,
+              f"{missed['deg']}° off · {missed['off'] * 100:.0f}% off the spot")
+        panel(c, at(clip["controlled"], t, 0.0), (710, 110, 400, 500), "PLACED FROM 3D", GREEN, GREEN,
+              f"{fixed['deg']:.0f}° off · {fixed['off'] * 100:.0f}% off the spot")
         d = ImageDraw.Draw(c)
-        x = 60
-        for color, name in ((BLUE, "Depth Anything 3"), (GOLD, "Momento nodes"), (PURPLE, "MiniMax H3 + Fun ControlNet"),
-                            (GREEN, "SAM 3D Body")):
-            d.rectangle((x, 668, x + 18, 686), fill=color)
-            d.text((x + 26, 666), name, font=font("Medium", 18), fill=WHITE)
-            x += 40 + int(d.textlength(name, font=font("Medium", 18)))
+        mark(d, (525, 545), False, 56)
+        mark(d, (1065, 545), True, 56)
         return c
 
     tmp = Path(tempfile.mkdtemp())
     parts = []
-    for i, scene in enumerate((s1, s2, s3, s4, s5), 1):
+    for i, scene in enumerate((s1, s2, s3, s4), 1):
         wav = src / f"explain_{i}.wav"
-        secs = duration(wav) + (1.0 if i == 5 else 0.0)
+        secs = max(duration(wav), 4.8) if i in (2, 4) else duration(wav)  # let the clips play through
         n = int(secs * FPS)
         for f in range(n):
             scene(f / FPS).save(tmp / f"f{f:05d}.png")
