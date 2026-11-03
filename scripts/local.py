@@ -52,22 +52,6 @@ H3 = dict(unet=os.environ.get("H3_UNET", "minimax_h3_fl2va_pruned_int8_convrot.s
           lora="minimax_h3_fl2v_turbo_8step_v1.0_comfyui_bf16.safetensors",
           vae="minimax_h3_video_vae_int8_convrot.safetensors", audio_vae="minimax_h3_audio_vae_fp32.safetensors",
           clip="qwen3vl_32b_minimax_h3_int8_convrot.safetensors")
-GAP = "#FF00FF"  # what RenderMesh draws where the camera sees past the photo; the fill outpaints it
-END_ONLY = os.environ.get("END_ONLY", "1") == "1"  # H3 gets only the end frame: a separate start frame morphs
-CONTROL = os.environ.get("CONTROL") == "1"  # geometry as conditioning: depth-driven camera, pose-inpainted photographer
-# depth sets the camera path and the layout early, then lets go so the subject can move (0.7/0.6 froze the bus)
-CN_DEPTH, CN_DEPTH_END = float(os.environ.get("CN_DEPTH", "0.6")), float(os.environ.get("CN_DEPTH_END", "0.3"))
-# H3 steps and whether the turbo LoRA is on, per pass: the fast default (8 / 4 turbo steps), or e.g. P2_STEPS=30
-# P2_TURBO=0 for the full model (Fun ControlNet-Union's own results use 40 steps)
-EXPLAIN = os.environ.get("EXPLAIN") == "1"  # also save the pose video and SAM 3D Body's view, for the demo
-P1 = (int(os.environ.get("P1_STEPS", "8")), os.environ.get("P1_TURBO", "1") == "1")
-P2 = (int(os.environ.get("P2_STEPS", "4")), os.environ.get("P2_TURBO", "1") == "1")
-CN_PATCH = "minimax_h3_fun_controlnet_union_2.0_pruned_int8_convrot.safetensors"
-REF2VA = dict(unet="minimax_h3_ref2va_pruned_int8_convrot.safetensors",
-              lora="minimax_h3_ref2v_turbo_4step_v0.1_comfyui_bf16.safetensors")
-FLEX = os.environ.get("FLEX") == "1"  # Pika H3 Flex: directed camera moves, Comfy's 6-step recipe
-if FLEX:
-    H3["lora"] = "pika_h3_flex_fl2va_v1_bf16.safetensors"
 
 SHEET = ("Character turnaround sheet, four full-body views side by side on a plain light grey studio background: "
          "front, three-quarter front, side profile, and back. Same face, hair, build and clothes in every view. In the "
@@ -81,10 +65,9 @@ real photo they took. The video is NOT supposed to end on that photo: it ends on
 scene, photographer included, and then cuts to the photo. Judge the video frames as a short film of that moment.
 Reject only for failures a viewer would notice at a glance: a person melting, morphing, multiplying or popping in and
 out; extra limbs; hands and camera fusing into a blob; the subject frozen instead of moving; the scene not being the
-real photo's place and subject; text or watermarks. Also reject, always: underwear, exposed skin or anything
-revealing or sexualised about anyone, including the photographer (no crouching or squatting poses that show it);
-objects floating in the air with nothing holding them up; a car, person or object passing through someone; the
-photographer sliding or drifting across the ground instead of standing in one spot; a blurry or smeared person.
+real photo's place and subject; text or watermarks. Also reject, always: underwear, exposed skin or anything revealing or sexualised about anyone, including the
+photographer; objects floating in the air with nothing holding them up; a car, person or object passing through
+someone; the photographer sliding or drifting across the ground instead of standing in one spot.
 Score how good a take it is overall. Reply with JSON only:
 {"pass": true or false, "score": 1-10, "problem": "<the worst problem in one short sentence, or empty>"}"""
 
@@ -107,14 +90,12 @@ def ask(system, text, images):
     raise RuntimeError(f"planner failed: {r.stdout[:500]} {r.stderr[:300]}")
 
 
-def klein(g, prompt, refs, seed, width=W, height=H, steps=16, loras=()):
-    """FLUX 3 Klein (open weights): prompt + reference images (ref_image_0, ref_image_1, ...). loras: (name, strength)."""
+def klein(g, prompt, refs, seed, width=W, height=H, steps=16):
+    """FLUX 3 Klein (open weights): prompt + reference images (ref_image_0, ref_image_1, ...)."""
     clip = g.add("CLIPLoader", clip_name=KLEIN_TE, type="flux3", device="default")
     vae = g.add("VAELoader", vae_name=FLUX_VAE)
-    base = g.add("UNETLoader", unet_name=KLEIN, weight_dtype="default")
-    for name, strength in loras:
-        base = g.add("LoraLoaderModelOnly", lora_name=name, strength_model=strength, model=base())
-    model = g.add("ModelSamplingFlux", model=base(), max_shift=2.77, base_shift=2.77, width=width, height=height)
+    model = g.add("ModelSamplingFlux", model=g.add("UNETLoader", unet_name=KLEIN, weight_dtype="default")(),
+                  max_shift=2.77, base_shift=2.77, width=width, height=height)
     refd = g.add("ReferenceMultiLatent", vae=vae(), resolution="resize", **{"resolution.megapixels": MP},
                  positive=g.add("CLIPTextEncode", text=prompt, clip=clip())(),
                  negative=g.add("CLIPTextEncode", text="", clip=clip())(),
@@ -123,18 +104,6 @@ def klein(g, prompt, refs, seed, width=W, height=H, steps=16, loras=()):
                 positive=refd(0), negative=refd(1), denoise=1.0,
                 latent_image=g.add("EmptyFlux2LatentImage", width=width, height=height, batch_size=1)())
     return g.add("VAEDecode", samples=out(), vae=vae())
-
-
-def aim(eye=None):
-    """Which way the photographer faces in the bystander's frame, from 3D: they stand at the post's camera and shoot
-    along its axis, so their camera points at where that axis lands in this frame."""
-    eye = eye or geo.START
-    me = geo.project((0.0, -0.3, 0.0), eye)[0] / geo.W
-    there = geo.project((0.0, -0.1, -8.0), eye)[0] / geo.W
-    side = "to their left" if there < me - 0.05 else "to their right" if there > me + 0.05 else "straight ahead"
-    return (f"seen from directly behind, their back to us, facing away from us into the scene, turned slightly {side} "
-            f"so their camera points at the subject near the {'left' if there < 0.4 else 'right' if there > 0.6 else 'center'}"
-            " of the frame, never toward us or out of the frame")
 
 
 def rows(layout):
@@ -163,46 +132,38 @@ def graph(profile, post, plan, seed, prefix, closeup, move=None):
                     **{f"mode.position_{a}": v for a, v in zip("xyz", geo.START)},
                     target_x=geo.TARGET[0], target_y=geo.TARGET[1], target_z=geo.TARGET[2], roll=0.0, fov=geo.LENS,
                     zoom=1.0, camera_type="perspective")
-        view = g.add("RenderMesh", mesh=mesh(), mode="texture", width=W, height=H, background=GAP,
+        view = g.add("RenderMesh", mesh=mesh(), mode="texture", width=W, height=H, background="#000000",
                      camera_info=cam())
-        if move and not CONTROL:  # the opening view of the camera move, from the same 3D place
+        if move:  # the opening view of the camera move, from the same 3D place
             cam0 = g.add("CreateCameraInfo", mode="look_at",
                          **{f"mode.position_{a}": v for a, v in zip("xyz", geo.MOVES[move])},
                          target_x=geo.TARGET[0], target_y=geo.TARGET[1], target_z=geo.TARGET[2], roll=0.0,
                          fov=geo.LENS, zoom=1.0, camera_type="perspective")
-            view0 = g.add("RenderMesh", mesh=mesh(), mode="texture", width=W, height=H, background=GAP,
+            view0 = g.add("RenderMesh", mesh=mesh(), mode="texture", width=W, height=H, background="#000000",
                           camera_info=cam0())
-        instant = klein(g, "ref_image_0 is a bystander's view of a real place. The solid magenta areas are where the "
-                           "camera sees past what was photographed: they are missing, not part of the place. Extend the "
-                           "place outward into every magenta area so it fills the whole frame, with more of the same "
-                           "place, same light, same lens: no border, no frame, no magenta left. Keep everything else "
-                           "exactly as it is. No people in the foreground. " + plan["scene"],
+        instant = klein(g, "ref_image_0 is a bystander's view of a real place, with black gaps where the camera sees "
+                           "around things: fill them seamlessly with more of the same place, same light, same lens. "
+                           "Keep everything else exactly as it is. No people in the foreground. " + plan["scene"],
                         [view(0)], seed)
-    if CONTROL and not closeup:
-        return graph_control(g, mesh, instant, sheet, plan, seed, prefix, move)
-    fill = ("ref_image_0 is a bystander's view of a real place. The solid magenta areas are where the camera sees past "
-            "what was photographed: they are missing, not part of the place. Extend the place outward into every magenta "
-            "area so it fills the whole frame, with more of the same place, same light, same lens: no border, no frame, "
-            "no magenta left. Keep everything else exactly as it is. No people in the foreground. " + plan["scene"])
+    fill = ("ref_image_0 is a bystander's view of a real place, with black gaps where the camera sees around things: "
+            "fill them seamlessly with more of the same place, same light, same lens. Keep everything else exactly as "
+            "it is. No people in the foreground. " + plan["scene"])
 
     def place(img, eye, s_):
         return klein(g, "Add the person from ref_image_1's character sheet into ref_image_0 as the photographer: in "
-                        f"the foreground, {aim(eye)}, "
+                        f"the foreground, seen from behind and slightly to the side, turned toward the subject, "
                         f"{CAM['hold']}, aimed at the subject, taking a photo. Same hair and clothes as the sheet. "
                         "Exactly one photographer, no other copies of them. Change nothing else in ref_image_0. "
                      + plan["photographer"] + rows(geo.layout(eye, CAMERA)), [img, sheet()], s_)
 
-    opening = (place(klein(g, fill, [view0(0)], seed + 2)(), geo.MOVES[move], seed + 3)
-               if move and not closeup and not END_ONLY else None)
+    opening = place(klein(g, fill, [view0(0)], seed + 2)(), geo.MOVES[move], seed + 3) if move and not closeup else None
     placed = klein(g, "Add the person from ref_image_1's character sheet into ref_image_0 as the photographer: in the "
-                      f"foreground, {aim()}, "
+                      "foreground, seen from behind and slightly to the side, turned toward the subject, "
                       f"{CAM['hold']}, aimed at the subject, taking a photo. Same hair and clothes as the "
                       "sheet. Exactly one photographer, no other copies of them. Change nothing else in ref_image_0. "
                    + plan["photographer"] + rows(geo.layout(camera=CAMERA)),
                    [instant(), sheet()], seed + 1)
     g.add("SaveImage", images=g.add("ImageBatch", image1=instant(), image2=placed())(), filename_prefix=prefix + "_keys")
-    if opening:
-        g.add("SaveImage", images=opening(), filename_prefix=prefix + "_open")
     # MiniMax H3, open weights: the seconds before, ending on the placed instant; soundscape only, nobody speaks
     model = g.add("LoraLoaderModelOnly", lora_name=H3["lora"], strength_model=1.0,
                   model=g.add("UNETLoader", unet_name=H3["unet"], weight_dtype="default")())
@@ -214,114 +175,20 @@ def graph(profile, post, plan, seed, prefix, closeup, move=None):
             f"The subject is in motion and ends exactly in the moment of <Picture 1>: {plan['action']} {plan['scene']}"
             f"\noverall_soundscape: {plan['soundscape'].replace('phone camera shutter', CAMERA == 'dslr' and 'DSLR shutter' or 'phone camera shutter')}"
             f"\nnon_diegetic_music: N/A")
-    if move and END_ONLY:  # one image, the end; the move and the earlier action are text, so nothing pops in
-        text = text.replace("Handheld bystander camera, nearly still.", f"The camera makes {geo.MOVE_WORDS[move]}, "
-                            f"through this real place, coming to rest exactly on the framing of <Picture 1>.")
-        text = text.replace("The subject is in motion and ends", f"At the start, {plan.get('before', '')} The subject is in "
-                            "continuous motion the whole time and ends")
-    elif opening:
+    if opening:
         text = text.replace("Handheld bystander camera, nearly still.", f"The camera makes {geo.MOVE_WORDS[move]}, "
                             f"moving through the real space of <Picture 1> to <Picture 2>.")
-    ends = ({"first_frame": opening(), "last_frame": placed()} if opening and not END_ONLY
-            else {"last_frame": placed()})
+    ends = {"first_frame": opening(), "last_frame": placed()} if opening else {"last_frame": placed()}
     cond = g.add("MiniMaxH3ImageToVideo", prompt=text, width=W, height=H, length=H3_FRAMES, **ends,
                  clip=g.add("CLIPLoader", clip_name=H3["clip"], type="minimax", device="default")(), vae=vae())
     out = g.add("SamplerCustomAdvanced", noise=g.add("RandomNoise", noise_seed=seed)(),
                 guider=g.add("BasicGuider", model=model(), conditioning=cond(0))(),
-                sampler=g.add("KSamplerSelect", sampler_name="lcm" if FLEX else "res_multistep")(),
-                sigmas=g.add("ManualSigmas", sigmas="1.0, 0.972973, 0.923077, 0.8, 0.571429, 0.333333, 0.0")() if FLEX
-                else g.add("BasicScheduler", model=model(), scheduler="simple", steps=8, denoise=1.0)(),
+                sampler=g.add("KSamplerSelect", sampler_name="res_multistep")(),
+                sigmas=g.add("BasicScheduler", model=model(), scheduler="simple", steps=8, denoise=1.0)(),
                 latent_image=cond(1))
     video = g.add("CreateVideo", fps=float(FPS), images=g.add("VAEDecode", samples=out(0), vae=vae())(),
                   audio=g.add("VAEDecodeAudio", samples=out(0), vae=avae())())
     g.add("SaveVideo", video=video(), filename_prefix=prefix + "_final", format="mp4", codec="h264")
-    return g
-
-
-def h3_sample(g, model, cond, seed, steps):
-    return g.add("SamplerCustomAdvanced", noise=g.add("RandomNoise", noise_seed=seed)(),
-                 guider=g.add("BasicGuider", model=model, conditioning=cond(0))(),
-                 sampler=g.add("KSamplerSelect", sampler_name="res_multistep")(),
-                 sigmas=g.add("BasicScheduler", model=model, scheduler="simple", steps=steps, denoise=1.0)(),
-                 latent_image=cond(1))
-
-
-def graph_control(g, mesh, instant, sheet, plan, seed, prefix, move):
-    """Geometry as conditioning. Pass 1 films the place: the camera follows a depth video rendered from the post's
-    3D mesh along the computed path, ending on the outpainted instant (nobody in the foreground). Pass 2 inpaints the
-    photographer into that clip: MiniMax H3 Ref2VA (identity from the character sheet) under a DWPose skeleton and a
-    mask, both projected from 3D (Momento Photographer), so where they stand, which way they face and where their hands and
-    camera are come from the geometry, not from a prompt."""
-    g.add("SaveImage", images=instant(), filename_prefix=prefix + "_keys")
-    clip = g.add("CLIPLoader", clip_name=H3["clip"], type="minimax", device="default")
-    vae = g.add("VAELoader", vae_name=H3["vae"])
-    avae = g.add("VAELoader", vae_name=H3["audio_vae"])
-    patch = g.add("ModelPatchLoader", name=CN_PATCH)
-
-    # the camera path through the post's 3D place (and the ground under the photographer), as depth
-    mv = move or "still"
-    depth = g.add("MomentoCameraPath", mesh=mesh(), move=mv, frames=H3_FRAMES, width=W, height=H, ground=True,
-                  render="depth")(0)
-    g.add("SaveAnimatedWEBP", images=depth, fps=float(FPS), lossless=False, quality=60, method="default",
-          filename_prefix=prefix + "_depth")
-
-    # pass 1: the place and the subject's action, the camera locked to the depth video
-    unet = g.add("UNETLoader", unet_name=H3["unet"], weight_dtype="default")
-    m1 = (g.add("LoraLoaderModelOnly", lora_name="minimax_h3_fl2v_turbo_8step_v1.0_comfyui_bf16.safetensors",
-                strength_model=1.0, model=unet()) if P1[1] else unet)
-    m1 = g.add("MiniMaxH3FunControlNetApply", model=m1(), model_patch=patch(), vae=vae(), strength=CN_DEPTH,
-               start_percent=0.0, end_percent=CN_DEPTH_END, control_video=depth)
-    sound = plan["soundscape"].replace("phone camera shutter", CAMERA == "dslr" and "DSLR shutter" or
-                                       "phone camera shutter")
-    scene = (f"integrated_multimodal_description: The camera makes {geo.MOVE_WORDS[move] if move else 'no move'}, "
-             f"through this real place, coming to rest exactly on the framing of <Picture 1>. At the start, "
-             f"{plan.get('before', '')} The subject is in continuous motion the whole time and ends exactly in the "
-             f"moment of <Picture 1>: {plan['action']} {plan['scene']}"
-             f"\noverall_soundscape: {sound}\nnon_diegetic_music: N/A")
-    c1 = g.add("MiniMaxH3ImageToVideo", prompt=scene, width=W, height=H, length=H3_FRAMES, last_frame=instant(),
-               clip=clip(), vae=vae())
-    s1 = h3_sample(g, m1(), c1, seed, P1[0])
-    place = g.add("VAEDecode", samples=s1(0), vae=vae())
-    audio = g.add("VAEDecodeAudio", samples=s1(0), vae=avae())
-    g.add("SaveVideo", video=g.add("CreateVideo", fps=float(FPS), images=place(), audio=audio())(),
-          filename_prefix=prefix + "_place", format="mp4", codec="h264")
-
-    # pass 2: the photographer, inpainted under the projected skeleton and mask
-    # planted on pass 1's own ground: RAFT tracks the ground round their feet back from the last frame
-    plant = {} if os.environ.get("PLANT") == "0" else dict(
-        footage=place(), optical_flow=g.add("OpticalFlowLoader", model_name="raft_large.pth")())
-    who_3d = g.add("MomentoPhotographer", move=mv, camera=CAMERA, frames=H3_FRAMES, width=W, height=H, **plant)
-    pose, mask = (lambda: who_3d(0)), (lambda: who_3d(1))
-    unet2 = g.add("UNETLoader", unet_name=REF2VA["unet"], weight_dtype="default")
-    m2 = (g.add("LoraLoaderModelOnly", lora_name=REF2VA["lora"], strength_model=1.0, model=unet2()) if P2[1]
-          else unet2)
-    m2 = g.add("MiniMaxH3FunControlNetApply", model=m2(), model_patch=patch(), vae=vae(), strength=1.0,
-               start_percent=0.0, end_percent=1.0, control_video=pose(), mask=mask(), source_video=place())
-    who = (f"integrated_multimodal_description: The same shot of the same place, unchanged. In the foreground stands "
-           f"the person from <Picture 1>, {plan['photographer']}, seen from behind, {CAM['act']}. {plan['scene']}"
-           f"\noverall_soundscape: {sound}\nnon_diegetic_music: N/A")
-    c2 = g.add("MiniMaxH3ReferenceToVideo", prompt=who, width=W, height=H, length=H3_FRAMES, ref_image_size="match",
-               clip=clip(), vae=vae(), audio_vae=avae(), **{"ref_images.ref_image_0": sheet()})
-    s2 = h3_sample(g, m2(), c2, seed + 7, P2[0])
-    # keep pass 1 exactly outside the photographer: the model redraws the whole frame, the mask decides what's kept
-    who_px = g.add("VAEDecode", samples=s2(0), vae=vae())
-    final = g.add("ImageCompositeMasked", destination=place(), source=who_px(), x=0, y=0, resize_source=False,
-                  mask=mask())
-    video = g.add("CreateVideo", fps=float(FPS), images=final(), audio=audio())
-    g.add("SaveVideo", video=video(), filename_prefix=prefix + "_final", format="mp4", codec="h264")
-    # measured, not judged: SAM 3D Body on frames after the raise, inside the box the 3D puts the photographer in
-    picks = g.add("MomentoGateFrames", images=final(), move=mv, camera=CAMERA)
-    body = g.add("SAM3DBody_Predict", image=picks(0), bboxes=picks(1), run_hand_refinement=False, fov=geo.LENS,
-                 batch_size=4, sam3d_body_model=g.add("SAM3DBody_Loader",
-                                                      model_file="sam_3d_body_dinov3_bf16.safetensors")())
-    g.add("MomentoGate", pose_data=body(), move=mv, camera=CAMERA, frames=H3_FRAMES, width=W, height=H)
-    if EXPLAIN:  # what the demo shows: the projected skeleton, and the body SAM 3D Body measured, over the take
-        g.add("SaveVideo", video=g.add("CreateVideo", fps=float(FPS), images=pose())(), filename_prefix=prefix + "_pose",
-              format="mp4", codec="h264")
-        g.add("SaveImage", filename_prefix=prefix + "_body",
-              images=g.add("SAM3DBody_Render", pose_data=body(), width=W, height=H, background=picks(0),
-                           **{"render_style": "mesh", "render_style.shader": "default", "render_style.opacity": 0.65,
-                              "render_style.person_palette_falloff": 0.6, "render_style.region": "full_body"})())
     return g
 
 
@@ -343,9 +210,6 @@ def run(g, timeout=3600):
         if g.get(node, {}).get("class_type") in ("SaveImage", "SaveVideo"):
             tag = g[node]["inputs"]["filename_prefix"].split("_")[-1]
             files[tag] = out.get("images", []) + out.get("videos", [])
-        for text in out.get("text", []):
-            if text.startswith("GATE "):
-                files["gate"] = json.loads(text[5:])
     return files
 
 
@@ -360,17 +224,14 @@ def take(profile_up, post_up, profile, post, plan, closeup, n, out):
     t = time.time()
     # a camera move by default (it looks much better); ALLOW_STILL=1 lets a take keep the camera still
     moves = [None, *geo.MOVES] if os.environ.get("ALLOW_STILL") else list(geo.MOVES)
-    move = None if closeup else os.environ.get("MOVE") or random.choice(moves)  # variety, or MOVE= to pin it
+    move = None if closeup else random.choice(moves)  # variety: a still bystander or a camera move
     print(f"[{tag}] camera: {move or 'still'}", flush=True)
-    seed = int(os.environ.get("SEED") or random.randrange(2**31))  # SEED= to repeat a take
-    files = run(graph(profile_up, post_up, plan, seed, f"momento/{tag}", closeup, move))
+    files = run(graph(profile_up, post_up, plan, random.randrange(2**31), f"momento/{tag}", closeup, move))
     od = Path(out) / "steps"
     od.mkdir(parents=True, exist_ok=True)
     fetch(files["sheet"][0], od / f"{tag}_sheet.png")
     for i, f in enumerate(files["keys"]):
         fetch(f, od / f"{tag}_key{i}.png")
-    for f in files.get("open", []):
-        fetch(f, od / f"{tag}_open.png")
     raw, final = od / f"{tag}_raw.mp4", Path(out) / f"{tag}.mp4"
     fetch(files["final"][0], raw)
     reveal(str(raw), post, str(final))
@@ -379,10 +240,6 @@ def take(profile_up, post_up, profile, post, plan, closeup, n, out):
         subprocess.run(["ffmpeg", "-v", "error", "-y", "-ss", str(s), "-i", str(raw), "-frames:v", "1",
                         "-vf", "scale=-2:384", str(frames / f"{i}.jpg")], check=True)
     verdict = ask(CRITIC, "Review this take.", sorted(map(str, frames.glob("*.jpg"))) + [post])
-    if "gate" in files:  # the Momento Gate node measured the photographer against the 3D (SAM 3D Body)
-        verdict["geometry"] = files["gate"]["frames"]
-        if not files["gate"]["ok"]:
-            verdict.update({"pass": False, "score": 0, "problem": f"geometry gate failed: {files['gate']['frames']}"})
     print(f"[{tag}] take {n} ({time.time() - t:.0f}s) {final} review {verdict}", flush=True)
     return (verdict.get("score") or 0) + (10 if verdict.get("pass") else 0), final, verdict
 

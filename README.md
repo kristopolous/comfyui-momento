@@ -128,9 +128,6 @@ The output for each post is `out/<post>_local<N>.mp4`, with every step's images 
 - Every take has a camera move through the 3D scene (dolly in, orbit or crane down). `ALLOW_STILL=1` also allows a
   still camera.
 - `TAKES=2` sets how many takes the critic picks from.
-- `PULL_BACK=1.5` (the default) is how far back the bystander stands, as a multiple of the old 1.7 m: the photographer is head to toe in the frame with the place around them. Where the camera sees past the post, the gaps render magenta and FLUX 3 Klein outpaints them.
-- `FLEX=1` films with [Pika H3 Flex](https://huggingface.co/Pika-Labs/Pika-H3-Flex) (Comfy's 6-step recipe) instead of the 8-step turbo LoRA. Put `pika_h3_flex_fl2va_v1_bf16.safetensors` from Comfy-Org/MiniMax-H3 in `loras/`.
-- `SEED=` and `MOVE="dolly in"|orbit|"crane down"` repeat a take exactly, for A/B tests.
 - `--hires` gives 448×768, and `RES=576x1024` goes bigger on a 48 GB GPU.
 - If only another machine can reach the planner, `PLANNER=<ssh host>` calls it through that machine.
 

@@ -8,7 +8,6 @@ A vision LLM plans the moment (outside the graph); then one graph:
 """
 import json
 import math
-import os
 
 try:
     from .graph import Graph
@@ -42,14 +41,14 @@ real photo they took. The video is NOT supposed to end on that photo: it ends on
 scene, photographer included, and then cuts to the photo. Judge the video frames as a short film of that moment.
 Reject only for failures a viewer would notice at a glance: a person melting, morphing, multiplying or popping in and
 out; extra limbs; hands and camera fusing into a blob; the subject frozen instead of moving; the scene not being the
-real photo's place and subject; text or watermarks. Score how good a take it is overall. Reply with JSON only:
+real photo's place and subject; text or watermarks. Also reject, always: underwear, exposed skin or anything revealing or sexualised about anyone, including the
+photographer; objects floating in the air with nothing holding them up; a car, person or object passing through
+someone; the photographer sliding or drifting across the ground instead of standing in one spot.
+Score how good a take it is overall. Reply with JSON only:
 {"pass": true or false, "score": 1-10, "problem": "<the worst problem in one short sentence, or empty>"}"""
 
 # the bystander's camera, in the post's 3D space (metric; the photographer stands at the origin, facing -z)
-GAP = "#FF00FF"  # what RenderMesh draws where the camera sees past the photo; the fill outpaints it
-PULL_BACK = float(os.environ.get("PULL_BACK", "1.5"))  # how far back the bystander stands (1 = the old 1.7 m)
-back = lambda x, y, z: (x * PULL_BACK, y, z * PULL_BACK)  # noqa: E731
-LENS, TARGET, START = 62.0, (0.0, -0.1, -4.0), back(-0.4, 0.1, 1.7)  # LENS: vertical fov for a portrait frame
+LENS, TARGET, START = 62.0, (0.0, -0.1, -4.0), (-0.4, 0.1, 1.7)  # LENS: vertical fov for a portrait frame
 
 
 def lens(width, height):
@@ -64,12 +63,9 @@ def orbit(eye, degrees):
 
 
 # camera moves: where the take starts; it always ends at START, behind the photographer
-# the dolly tracks sideways into the end framing, aimed at the subject the whole way (a pan, with parallax); a
-# straight push-in along the line of sight reads as a zoom, which is creepy
-MOVES = {"dolly": (START[0] - 0.7, START[1], START[2] + 0.35), "orbit": orbit(START, 28),
-         "crane down": back(-0.35, 1.3, 2.1)}
-MOVE_WORDS = {"dolly": "a slow sideways dolly track that pans to stay on the subject",
-              "orbit": "a slow arc around the photographer", "crane down": "a slow crane down from above"}
+MOVES = {"dolly in": (-0.55, 0.15, 3.0), "orbit": orbit(START, 28), "crane down": (-0.35, 1.3, 2.1)}
+MOVE_WORDS = {"dolly in": "a slow dolly in from further back", "orbit": "a slow arc around the photographer",
+              "crane down": "a slow crane down from above"}
 
 # what the photographer holds (the page's Phone / DSLR toggle)
 CAMERAS = {
@@ -149,10 +145,9 @@ def build(profile, post, plan, seed, prefix, move, camera="smartphone", h3_unet=
                   "lighting. If ref_image_0 shows a person, it is them, exactly; if not, the character is the "
                   "anonymous everyday person described here. The character: " + plan["photographer"],
                   [who(0)], seed, w=768, h=448)
-    fill = ("ref_image_0 is a bystander's view of a real place. The solid magenta areas are where the camera sees past "
-            "what was photographed: they are missing, not part of the place. Extend the place outward into every magenta "
-            "area so it fills the whole frame, with more of the same place, same light, same lens: no border, no frame, "
-            "no magenta left. Keep everything else exactly as it is. No people in the foreground. " + plan["scene"])
+    fill = ("ref_image_0 is a bystander's view of a real place, with black gaps where the camera sees around things: "
+            "fill them seamlessly with more of the same place, same light, same lens. Keep everything else exactly as "
+            "it is. No people in the foreground. " + plan["scene"])
 
     def place(img, eye, s, ready=False):
         """The photographer from the sheet, placed from 3D, seen from behind. ready: a second earlier, camera still
@@ -185,7 +180,7 @@ def build(profile, post, plan, seed, prefix, move, camera="smartphone", h3_unet=
                       target_x=TARGET[0], target_y=TARGET[1], target_z=TARGET[2], roll=0.0, fov=lens(width, height), zoom=1.0,
                       camera_type="perspective")
             return g.add("RenderMesh", mesh=mesh(), mode="texture", width=width, height=height,
-                         background=GAP, camera_info=c())(0)
+                         background="#000000", camera_info=c())(0)
 
         instant = klein(fill, [view(START)], seed)
     if plan.get("closeup"):

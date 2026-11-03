@@ -41,9 +41,8 @@ INPAINT = "ltx-2.3-22b-ic-lora-in-outpainting-0.9.safetensors"
 
 PLAN = """Left image: someone's profile picture. Right image: a photo they posted. Reply with JSON only:
 {"scene": "<one sentence: the place, the light, and the subject of the photo (who or what, what they wear)>",
- "before": "<one sentence: the scene three or four seconds BEFORE the photo, an earlier stage of the same action
-   (surfers still climbing out of the helicopter with their boards; a singer crouched at the mic before throwing her
-   arm up; a bus still down the street)>",
+ "before": "<one sentence: the subject a beat BEFORE the instant the photo froze, mid-action (a different pose,
+   moving toward the photo's pose)>",
  "action": "<one sentence: what the subject does over four seconds, ending in exactly the pose or instant the photo
    froze. Active, never posing.>",
  "photographer": "<one short phrase: the person in the profile picture (or, if it isn't a person, an anonymous

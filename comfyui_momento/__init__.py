@@ -15,7 +15,6 @@ from typing_extensions import override
 from comfy_api.latest import ComfyExtension, InputImpl, Types, io, ui
 
 from .director import MUSIC, QUIET, VIDEO_NEGATIVE
-from .geometry import NODES as GEOMETRY_NODES
 
 WEB_DIRECTORY = "./web"
 
@@ -290,7 +289,7 @@ class MomentoReview(io.ComfyNode):
 class MomentoExtension(ComfyExtension):
     @override
     async def get_node_list(self) -> list[type[io.ComfyNode]]:
-        return [MomentoPlan, MomentoReveal, MomentoFit, MomentoCanvas, MomentoPaste, MomentoReview, *GEOMETRY_NODES]
+        return [MomentoPlan, MomentoReveal, MomentoFit, MomentoCanvas, MomentoPaste, MomentoReview]
 
 
 async def comfy_entrypoint() -> MomentoExtension:
