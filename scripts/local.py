@@ -48,6 +48,7 @@ PLANNER_MODEL = os.environ.get("PLANNER_MODEL", "qwen3-vl")
 
 KLEIN, KLEIN_TE, FLUX_VAE = ("flux3-image-klein-int8-convrot.safetensors", "qwen3vl_4b_int8_convrot.safetensors",
                              "flux2-vae.safetensors")
+LOOK_LORA, TRIGGER = os.environ.get("LOOK_LORA", ""), os.environ.get("TRIGGER", "")
 H3 = dict(unet=os.environ.get("H3_UNET", "minimax_h3_fl2va_pruned_int8_convrot.safetensors"),
           lora="minimax_h3_fl2v_turbo_8step_v1.0_comfyui_bf16.safetensors",
           vae="minimax_h3_video_vae_int8_convrot.safetensors", audio_vae="minimax_h3_audio_vae_fp32.safetensors",
@@ -167,9 +168,11 @@ def graph(profile, post, plan, seed, prefix, closeup, move=None):
     # MiniMax H3, open weights: the seconds before, ending on the placed instant; soundscape only, nobody speaks
     model = g.add("LoraLoaderModelOnly", lora_name=H3["lora"], strength_model=1.0,
                   model=g.add("UNETLoader", unet_name=H3["unet"], weight_dtype="default")())
+    if LOOK_LORA:  # off by default: a look LoRA on top (e.g. h3_realism_people.safetensors, trigger r34l1sm)
+        model = g.add("LoraLoaderModelOnly", lora_name=LOOK_LORA, strength_model=1.0, model=model())
     vae = g.add("VAELoader", vae_name=H3["vae"])
     avae = g.add("VAELoader", vae_name=H3["audio_vae"])
-    text = (f"integrated_multimodal_description: Handheld bystander camera, nearly still. The photographer in the "
+    text = (f"integrated_multimodal_description: {TRIGGER + ' ' if TRIGGER else ''}Handheld bystander camera, nearly still. The photographer in the "
             f"foreground, seen from behind, {CAM['act']}. "
             f"There is exactly one photographer; no one else appears who looks like them. "
             f"The subject is in motion and ends exactly in the moment of <Picture 1>: {plan['action']} {plan['scene']}"
@@ -224,9 +227,10 @@ def take(profile_up, post_up, profile, post, plan, closeup, n, out):
     t = time.time()
     # a camera move by default (it looks much better); ALLOW_STILL=1 lets a take keep the camera still
     moves = [None, *geo.MOVES] if os.environ.get("ALLOW_STILL") else list(geo.MOVES)
-    move = None if closeup else random.choice(moves)  # variety: a still bystander or a camera move
+    move = None if closeup else os.environ.get("MOVE") or random.choice(moves)  # MOVE= pins it, for A/B tests
     print(f"[{tag}] camera: {move or 'still'}", flush=True)
-    files = run(graph(profile_up, post_up, plan, random.randrange(2**31), f"momento/{tag}", closeup, move))
+    seed = int(os.environ.get("SEED") or random.randrange(2**31))  # SEED= repeats a take, for A/B tests
+    files = run(graph(profile_up, post_up, plan, seed, f"momento/{tag}", closeup, move))
     od = Path(out) / "steps"
     od.mkdir(parents=True, exist_ok=True)
     fetch(files["sheet"][0], od / f"{tag}_sheet.png")
@@ -248,7 +252,13 @@ def shoot(profile, post, takes=int(os.environ.get("TAKES", 2)), out="out"):
     name = Path(post).stem
     closeup = "CLOSEUP" in json.dumps(ask(CLASSIFY + ' Reply as JSON: {"kind": "CLOSEUP" or "SCENE"}', "Classify.",
                                           [post])).upper()
-    plan = ask(PLAN, "Left: the profile picture. Right: the photo they posted. Plan the moment.", [profile, post])
+    saved = os.environ.get("PLAN_JSON")  # reuse one plan across an A/B pair
+    if saved and Path(saved).exists():
+        plan = json.loads(Path(saved).read_text())
+    else:
+        plan = ask(PLAN, "Left: the profile picture. Right: the photo they posted. Plan the moment.", [profile, post])
+        if saved:
+            Path(saved).write_text(json.dumps(plan))
     print(f"[{name}] {'CLOSEUP' if closeup else 'SCENE'} plan: {json.dumps(plan)[:300]}", flush=True)
     pu, su = comfy.upload(profile, f"momento_{Path(profile).name}"), comfy.upload(post, f"momento_{Path(post).name}")
     results = [take(pu, su, profile, post, plan, closeup, n, out) for n in range(1, takes + 1)]  # one GPU: in turn

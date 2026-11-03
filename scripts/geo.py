@@ -14,6 +14,7 @@ that point, so where the photographer is and which way they face are facts, not 
 """
 import json
 import math
+import os
 import random
 import sys
 import time
@@ -51,9 +52,10 @@ def path():
     return [tuple(a + (b - a) * ease(i / (KEYS - 1)) for a, b in zip(START, END)) for i in range(KEYS)]
 
 
-def project(point, eye, target=TARGET, fov=LENS, width=None, height=None):
-    """World point -> pixel, for RenderMesh's look-at camera (Y up). Uses the current W, H (set at run time)."""
-    width, height = width or W, height or H
+def project(point, eye, target=None, fov=LENS, width=None, height=None):
+    """World point -> pixel, for RenderMesh's look-at camera (Y up). Uses the current W, H and TARGET (set at run
+    time)."""
+    target, width, height = target or TARGET, width or W, height or H
     f = [t - e for t, e in zip(target, eye)]
     n = math.sqrt(sum(v * v for v in f))
     f = [v / n for v in f]
@@ -114,7 +116,7 @@ def orbit(eye, degrees):
 
 # camera moves through the post's 3D space: where the take starts; it always ends at START
 MOVES = {
-    "dolly in": (-0.55, 0.15, 3.0),          # from further back, pushing in behind the photographer
+    "dolly in": (-0.55, float(os.environ.get("DOLLY_Y", "0.15")), 3.0),          # from further back, pushing in behind the photographer
     "orbit": orbit(START, 28),               # swinging around from their right (a left orbit loses them)
     "crane down": (-0.35, 1.3, 2.1),         # from above, settling to eye level
 }
