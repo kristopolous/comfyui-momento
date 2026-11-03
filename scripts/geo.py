@@ -90,8 +90,8 @@ def layout(eye=None, camera="smartphone"):
         phone = [(x, y, z) for x in (-0.1, 0.1) for y in (-0.06, 0.08) for z in (-0.12, -0.3)]  # at the eye, lens out
     else:
         phone = [(x, y, -0.42) for x in (-0.08, 0.12) for y in (-0.02, 0.16)]  # arm's length, in front of the eyes
-    return [{"type": "obj", "bbox": box(body, eye), "desc": "photographer: image 2's person seen from behind and a "
-                                                              "little from the side, facing into the scene"},
+    return [{"type": "obj", "bbox": box(body, eye), "desc": "photographer: image 2's person seen from directly behind, "
+                                                              "facing away from us into the scene"},
             {"type": "obj", "bbox": box(phone, eye), "desc": CAMERAS[camera]["box"]}]
 
 
@@ -116,13 +116,13 @@ def orbit(eye, degrees):
 
 
 # camera moves through the post's 3D space: where the take starts; it always ends at START
-MOVES = {
-    "dolly in": back(-0.55, 0.15, 3.0),      # from further back, pushing in behind the photographer
+MOVES = {  # the same moves as the node pack (comfyui_momento/pipeline.py): a sideways dolly track, not a push-in
+    "dolly": (START[0] - 0.7, START[1], START[2] + 0.35),
     "orbit": orbit(START, 28),               # swinging around from their right (a left orbit loses them)
     "crane down": back(-0.35, 1.3, 2.1),     # from above, settling to eye level
 }
-MOVE_WORDS = {"dolly in": "a slow dolly in from further back", "orbit": "a slow arc around the photographer",
-              "crane down": "a slow crane down from above"}
+MOVE_WORDS = {"dolly": "a slow sideways dolly track that pans to stay on the subject",
+              "orbit": "a slow arc around the photographer", "crane down": "a slow crane down from above"}
 
 
 def field(g, text, name):

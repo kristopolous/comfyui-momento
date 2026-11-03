@@ -64,9 +64,12 @@ def orbit(eye, degrees):
 
 
 # camera moves: where the take starts; it always ends at START, behind the photographer
-MOVES = {"dolly in": back(-0.55, 0.15, 3.0), "orbit": orbit(START, 28), "crane down": back(-0.35, 1.3, 2.1)}
-MOVE_WORDS = {"dolly in": "a slow dolly in from further back", "orbit": "a slow arc around the photographer",
-              "crane down": "a slow crane down from above"}
+# the dolly tracks sideways into the end framing, aimed at the subject the whole way (a pan, with parallax); a
+# straight push-in along the line of sight reads as a zoom, which is creepy
+MOVES = {"dolly": (START[0] - 0.7, START[1], START[2] + 0.35), "orbit": orbit(START, 28),
+         "crane down": back(-0.35, 1.3, 2.1)}
+MOVE_WORDS = {"dolly": "a slow sideways dolly track that pans to stay on the subject",
+              "orbit": "a slow arc around the photographer", "crane down": "a slow crane down from above"}
 
 # what the photographer holds (the page's Phone / DSLR toggle)
 CAMERAS = {
