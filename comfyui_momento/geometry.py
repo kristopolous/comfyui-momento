@@ -58,10 +58,13 @@ def ease(t):
     return t * t * (3 - 2 * t)
 
 
-def camera_path(move, frames):
-    """The bystander's eye for each frame: from the move's start into the end framing (still: no move)."""
-    a = P.MOVES.get(move, P.START)
-    return [tuple(p + (q - p) * ease(i / max(1, frames - 1)) for p, q in zip(a, P.START)) for i in range(frames)]
+def camera_path(move, frames, pull_back=0.0):
+    """The bystander's eye for each frame: from the move's start into the end framing (still: no move).
+    pull_back > 0 overrides how far back they stand (as PULL_BACK: 1 = 1.7 m); 0.35 is just over the shoulder."""
+    k = pull_back / P.PULL_BACK if pull_back > 0 else 1.0
+    scale = lambda e: (e[0] * k, e[1], e[2] * k)  # noqa: E731
+    a, b = scale(P.MOVES.get(move, P.START)), scale(P.START)
+    return [tuple(p + (q - p) * ease(i / max(1, frames - 1)) for p, q in zip(a, b)) for i in range(frames)]
 
 
 def skeleton(t, camera):
@@ -77,9 +80,9 @@ def project(point, eye, w, h):
     return P.project(point, eye, w, h, fov=P.lens(w, h))
 
 
-def frame_joints(move, camera, frames, w, h):
+def frame_joints(move, camera, frames, w, h, pull_back=0.0):
     out = []
-    for i, eye in enumerate(camera_path(move, frames)):
+    for i, eye in enumerate(camera_path(move, frames, pull_back)):
         joints, held = skeleton(i / max(1, frames - 1), camera)
         out.append(({n: project(p, eye, w, h) for n, p in joints.items()}, project(held, eye, w, h)))
     return out
@@ -182,6 +185,9 @@ class MomentoCameraPath(io.ComfyNode):
         return io.NodeOutput(torch.cat(out, dim=0))
 
 
+FB_TOL = 2.0     # pixels: a tracked ground point that doesn't come back within this is dropped
+MAX_SHIFT = 0.1  # of the frame width: planting may move them this far off the computed path, no further
+
 # ground points around the photographer's feet (metres, on the ground plane): what the footage is tracked by
 GROUND = [(x, FEET, z) for x in (-0.45, 0.0, 0.45) for z in (-0.5, 0.05, 0.5)]
 
@@ -196,10 +202,10 @@ def track_back(frames, points, optical_flow):
     out = np.zeros((T, len(points), 2), dtype=np.float32)
     cur = np.asarray(points, dtype=np.float32)
     out[-1] = cur
-    for t in range(T - 1, 0, -1):
-        flow = raft(frames[t].permute(2, 0, 1), frames[t - 1].permute(2, 0, 1)).float().cpu().numpy()  # (2, H, W)
-        xs = np.clip(cur[:, 0], 0, W - 1)
-        ys = np.clip(cur[:, 1], 0, H - 1)
+    ok = np.ones((T, len(points)), dtype=bool)
+
+    def sample(flow, pts):
+        xs, ys = np.clip(pts[:, 0], 0, W - 1), np.clip(pts[:, 1], 0, H - 1)
         x0, y0 = np.floor(xs).astype(int), np.floor(ys).astype(int)
         x1, y1 = np.minimum(x0 + 1, W - 1), np.minimum(y0 + 1, H - 1)
         fx, fy = xs - x0, ys - y0
@@ -207,9 +213,21 @@ def track_back(frames, points, optical_flow):
         def at(c):
             return ((flow[c, y0, x0] * (1 - fx) + flow[c, y0, x1] * fx) * (1 - fy) +
                     (flow[c, y1, x0] * (1 - fx) + flow[c, y1, x1] * fx) * fy)
-        cur = cur + np.stack([at(0), at(1)], axis=1)
-        out[t - 1] = cur
-    return out
+        return np.stack([at(0), at(1)], axis=1)
+
+    alive = np.ones(len(points), dtype=bool)
+    for t in range(T - 1, 0, -1):
+        a, b = frames[t].permute(2, 0, 1), frames[t - 1].permute(2, 0, 1)
+        back = raft(a, b).float().cpu().numpy()
+        fwd = raft(b, a).float().cpu().numpy()
+        nxt = cur + sample(back, cur)
+        # forward-backward check: a point tracked back a frame must come forward to where it started
+        err = np.linalg.norm(nxt + sample(fwd, nxt) - cur, axis=1)
+        inside = (nxt[:, 0] >= 0) & (nxt[:, 0] < W) & (nxt[:, 1] >= 0) & (nxt[:, 1] < H)
+        alive &= (err < FB_TOL) & inside
+        cur = np.where(alive[:, None], nxt, cur)
+        out[t - 1], ok[t - 1] = cur, alive
+    return out, ok
 
 
 def fit_shift_scale(src, dst):
@@ -223,13 +241,22 @@ def fit_shift_scale(src, dst):
     return s, float(t[0]), float(t[1])
 
 
-def plant(per, ground_proj, tracked):
-    """Move each frame's projected skeleton and camera so the ground around the feet sits where the footage has it."""
-    planted = []
-    for (j2, held), g, tr in zip(per, ground_proj, tracked):
-        s, tx, ty = fit_shift_scale(g, tr)
-        f = lambda p: (s * p[0] + tx, s * p[1] + ty)  # noqa: E731
-        planted.append(({n: f(p) for n, p in j2.items()}, f(held)))
+def plant(per, ground_proj, tracked, width):
+    """Move each frame's projected skeleton and camera so the ground around the feet sits where the footage has it.
+    Frames where too few ground points tracked reliably keep the previous (later) frame's correction."""
+    pts, ok = tracked
+    planted, last = [None] * len(per), (1.0, 0.0, 0.0)
+    for i in range(len(per) - 1, -1, -1):
+        (j2, held), g = per[i], np.asarray(ground_proj[i])
+        if ok[i].sum() >= 3:
+            s, tx, ty = fit_shift_scale(g[ok[i]], pts[i][ok[i]])
+            c = g.mean(0)
+            shift = np.hypot(s * c[0] + tx - c[0], s * c[1] + ty - c[1])
+            if shift <= MAX_SHIFT * width:
+                last = (s, tx, ty)
+        s, tx, ty = last
+        f = lambda p, s=s, tx=tx, ty=ty: (s * p[0] + tx, s * p[1] + ty)  # noqa: E731
+        planted[i] = ({n: f(p) for n, p in j2.items()}, f(held))
     return planted
 
 
@@ -253,28 +280,31 @@ class MomentoPhotographer(io.ComfyNode):
                                tooltip="The filmed place (pass 1). With an optical flow model, the photographer is "
                                        "planted on its ground: tracked back from the last frame, where the 3D is exact."),
                 io.Custom("OPTICAL_FLOW").Input("optical_flow", optional=True),
+                io.Float.Input("pull_back", default=0.0, min=0.0, max=4.0, step=0.05, optional=True,
+                               tooltip="How far back the bystander stands (1 = 1.7 m); 0 = the pack default."),
             ],
             outputs=[io.Image.Output(display_name="pose"), io.Mask.Output(display_name="mask")],
         )
 
     @classmethod
-    def execute(cls, move, camera, frames, width, height, footage=None, optical_flow=None) -> io.NodeOutput:
-        per = frame_joints(move, camera, frames, width, height)
+    def execute(cls, move, camera, frames, width, height, footage=None, optical_flow=None,
+                pull_back=0.0) -> io.NodeOutput:
+        per = frame_joints(move, camera, frames, width, height, pull_back)
         if footage is not None and optical_flow is not None and footage.shape[0] >= frames:
-            path = camera_path(move, frames)
+            path = camera_path(move, frames, pull_back)
             ground_proj = [[project(p, eye, width, height) for p in GROUND] for eye in path]
             clip = footage[:frames]
             if clip.shape[1] != height or clip.shape[2] != width:
                 clip = torch.nn.functional.interpolate(clip.movedim(-1, 1), size=(height, width), mode="bilinear",
                                                        align_corners=False).movedim(1, -1)
-            per = plant(per, ground_proj, track_back(clip, ground_proj[-1], optical_flow))
+            per = plant(per, ground_proj, track_back(clip, ground_proj[-1], optical_flow), width)
         pose = _images([draw_pose(j2, width, height) for j2, _ in per])
         mask = torch.from_numpy(np.stack([np.asarray(draw_mask(j2, held, width, height), dtype=np.float32) / 255.0
                                           for j2, held in per]))
         return io.NodeOutput(pose, mask)
 
 
-GATE_AT = (0.7, 0.85, 0.98)
+GATE_AT = (0.15, 0.45, 0.7, 0.85, 0.98)  # early frames too: a photographer who pops in fails
 
 
 class MomentoGateFrames(io.ComfyNode):
@@ -385,7 +415,9 @@ class MomentoGate(io.ComfyNode):
             deg, hands_up, side = measure(best[1], eye)
             r = {"t": t, "deg": round(deg, 1), "hands_up_m": round(hands_up, 2), "hands_side_m": round(side, 2),
                  "off": round(best[0], 3)}
-            r["ok"] = (deg <= cls.MAX_DEG and best[0] <= cls.MAX_OFF and
+            # where they stand is only exact at the end of the move (mid-move they're planted on the filmed
+            # ground, which may lie off the computed path); facing and the camera at the eye are checked throughout
+            r["ok"] = (deg <= cls.MAX_DEG and (t < GATE_AT[-1] or best[0] <= cls.MAX_OFF) and
                        (t < RAISE[1] or (hands_up >= cls.MIN_HANDS and abs(side) <= cls.MAX_SIDE)))
             ok = ok and r["ok"]
             report.append(r)
@@ -393,4 +425,24 @@ class MomentoGate(io.ComfyNode):
         return io.NodeOutput(ok, text, ui=ui.PreviewText("GATE " + text))
 
 
-NODES = [MomentoCameraPath, MomentoPhotographer, MomentoGateFrames, MomentoGate]
+class MomentoRiseMask(io.ComfyNode):
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="MomentoRiseMask",
+            display_name="Momento Rise Mask",
+            category="Momento",
+            description="Extends a mask straight down to the bottom edge, column by column: the path something "
+                        "rising into frame from below travels along (hands bringing a phone up).",
+            inputs=[io.Mask.Input("mask")],
+            outputs=[io.Mask.Output(display_name="mask")],
+        )
+
+    @classmethod
+    def execute(cls, mask) -> io.NodeOutput:
+        m = mask if mask.dim() == 3 else mask[None]
+        # cumulative max from the top: a pixel is in if anything above it in its column is
+        return io.NodeOutput(torch.cummax((m > 0.5).float(), dim=1).values)
+
+
+NODES = [MomentoCameraPath, MomentoPhotographer, MomentoGateFrames, MomentoGate, MomentoRiseMask]

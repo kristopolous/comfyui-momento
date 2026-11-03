@@ -81,7 +81,11 @@ real photo they took. The video is NOT supposed to end on that photo: it ends on
 scene, photographer included, and then cuts to the photo. Judge the video frames as a short film of that moment.
 Reject only for failures a viewer would notice at a glance: a person melting, morphing, multiplying or popping in and
 out; extra limbs; hands and camera fusing into a blob; the subject frozen instead of moving; the scene not being the
-real photo's place and subject; text or watermarks. Score how good a take it is overall. Reply with JSON only:
+real photo's place and subject; text or watermarks. Also reject, always: underwear, exposed skin or anything
+revealing or sexualised about anyone, including the photographer (no crouching or squatting poses that show it);
+objects floating in the air with nothing holding them up; a car, person or object passing through someone; the
+photographer sliding or drifting across the ground instead of standing in one spot; a blurry or smeared person.
+Score how good a take it is overall. Reply with JSON only:
 {"pass": true or false, "score": 1-10, "problem": "<the worst problem in one short sentence, or empty>"}"""
 
 
@@ -103,12 +107,14 @@ def ask(system, text, images):
     raise RuntimeError(f"planner failed: {r.stdout[:500]} {r.stderr[:300]}")
 
 
-def klein(g, prompt, refs, seed, width=W, height=H, steps=16):
-    """FLUX 3 Klein (open weights): prompt + reference images (ref_image_0, ref_image_1, ...)."""
+def klein(g, prompt, refs, seed, width=W, height=H, steps=16, loras=()):
+    """FLUX 3 Klein (open weights): prompt + reference images (ref_image_0, ref_image_1, ...). loras: (name, strength)."""
     clip = g.add("CLIPLoader", clip_name=KLEIN_TE, type="flux3", device="default")
     vae = g.add("VAELoader", vae_name=FLUX_VAE)
-    model = g.add("ModelSamplingFlux", model=g.add("UNETLoader", unet_name=KLEIN, weight_dtype="default")(),
-                  max_shift=2.77, base_shift=2.77, width=width, height=height)
+    base = g.add("UNETLoader", unet_name=KLEIN, weight_dtype="default")
+    for name, strength in loras:
+        base = g.add("LoraLoaderModelOnly", lora_name=name, strength_model=strength, model=base())
+    model = g.add("ModelSamplingFlux", model=base(), max_shift=2.77, base_shift=2.77, width=width, height=height)
     refd = g.add("ReferenceMultiLatent", vae=vae(), resolution="resize", **{"resolution.megapixels": MP},
                  positive=g.add("CLIPTextEncode", text=prompt, clip=clip())(),
                  negative=g.add("CLIPTextEncode", text="", clip=clip())(),
