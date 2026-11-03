@@ -57,6 +57,11 @@ END_ONLY = os.environ.get("END_ONLY", "1") == "1"  # H3 gets only the end frame:
 CONTROL = os.environ.get("CONTROL") == "1"  # geometry as conditioning: depth-driven camera, pose-inpainted photographer
 # depth sets the camera path and the layout early, then lets go so the subject can move (0.7/0.6 froze the bus)
 CN_DEPTH, CN_DEPTH_END = float(os.environ.get("CN_DEPTH", "0.6")), float(os.environ.get("CN_DEPTH_END", "0.3"))
+# H3 steps and whether the turbo LoRA is on, per pass: the fast default (8 / 4 turbo steps), or e.g. P2_STEPS=30
+# P2_TURBO=0 for the full model (Fun ControlNet-Union's own results use 40 steps)
+EXPLAIN = os.environ.get("EXPLAIN") == "1"  # also save the pose video and SAM 3D Body's view, for the demo
+P1 = (int(os.environ.get("P1_STEPS", "8")), os.environ.get("P1_TURBO", "1") == "1")
+P2 = (int(os.environ.get("P2_STEPS", "4")), os.environ.get("P2_TURBO", "1") == "1")
 CN_PATCH = "minimax_h3_fun_controlnet_union_2.0_pruned_int8_convrot.safetensors"
 REF2VA = dict(unet="minimax_h3_ref2va_pruned_int8_convrot.safetensors",
               lora="minimax_h3_ref2v_turbo_4step_v0.1_comfyui_bf16.safetensors")
@@ -255,8 +260,8 @@ def graph_control(g, mesh, instant, sheet, plan, seed, prefix, move):
 
     # pass 1: the place and the subject's action, the camera locked to the depth video
     unet = g.add("UNETLoader", unet_name=H3["unet"], weight_dtype="default")
-    m1 = g.add("LoraLoaderModelOnly", lora_name="minimax_h3_fl2v_turbo_8step_v1.0_comfyui_bf16.safetensors",
-               strength_model=1.0, model=unet())
+    m1 = (g.add("LoraLoaderModelOnly", lora_name="minimax_h3_fl2v_turbo_8step_v1.0_comfyui_bf16.safetensors",
+                strength_model=1.0, model=unet()) if P1[1] else unet)
     m1 = g.add("MiniMaxH3FunControlNetApply", model=m1(), model_patch=patch(), vae=vae(), strength=CN_DEPTH,
                start_percent=0.0, end_percent=CN_DEPTH_END, control_video=depth)
     sound = plan["soundscape"].replace("phone camera shutter", CAMERA == "dslr" and "DSLR shutter" or
@@ -268,7 +273,7 @@ def graph_control(g, mesh, instant, sheet, plan, seed, prefix, move):
              f"\noverall_soundscape: {sound}\nnon_diegetic_music: N/A")
     c1 = g.add("MiniMaxH3ImageToVideo", prompt=scene, width=W, height=H, length=H3_FRAMES, last_frame=instant(),
                clip=clip(), vae=vae())
-    s1 = h3_sample(g, m1(), c1, seed, 8)
+    s1 = h3_sample(g, m1(), c1, seed, P1[0])
     place = g.add("VAEDecode", samples=s1(0), vae=vae())
     audio = g.add("VAEDecodeAudio", samples=s1(0), vae=avae())
     g.add("SaveVideo", video=g.add("CreateVideo", fps=float(FPS), images=place(), audio=audio())(),
@@ -278,7 +283,8 @@ def graph_control(g, mesh, instant, sheet, plan, seed, prefix, move):
     who_3d = g.add("MomentoPhotographer", move=mv, camera=CAMERA, frames=H3_FRAMES, width=W, height=H)
     pose, mask = (lambda: who_3d(0)), (lambda: who_3d(1))
     unet2 = g.add("UNETLoader", unet_name=REF2VA["unet"], weight_dtype="default")
-    m2 = g.add("LoraLoaderModelOnly", lora_name=REF2VA["lora"], strength_model=1.0, model=unet2())
+    m2 = (g.add("LoraLoaderModelOnly", lora_name=REF2VA["lora"], strength_model=1.0, model=unet2()) if P2[1]
+          else unet2)
     m2 = g.add("MiniMaxH3FunControlNetApply", model=m2(), model_patch=patch(), vae=vae(), strength=1.0,
                start_percent=0.0, end_percent=1.0, control_video=pose(), mask=mask(), source_video=place())
     who = (f"integrated_multimodal_description: The same shot of the same place, unchanged. In the foreground stands "
@@ -286,7 +292,7 @@ def graph_control(g, mesh, instant, sheet, plan, seed, prefix, move):
            f"\noverall_soundscape: {sound}\nnon_diegetic_music: N/A")
     c2 = g.add("MiniMaxH3ReferenceToVideo", prompt=who, width=W, height=H, length=H3_FRAMES, ref_image_size="match",
                clip=clip(), vae=vae(), audio_vae=avae(), **{"ref_images.ref_image_0": sheet()})
-    s2 = h3_sample(g, m2(), c2, seed + 7, 4)
+    s2 = h3_sample(g, m2(), c2, seed + 7, P2[0])
     # keep pass 1 exactly outside the photographer: the model redraws the whole frame, the mask decides what's kept
     who_px = g.add("VAEDecode", samples=s2(0), vae=vae())
     final = g.add("ImageCompositeMasked", destination=place(), source=who_px(), x=0, y=0, resize_source=False,
@@ -299,6 +305,12 @@ def graph_control(g, mesh, instant, sheet, plan, seed, prefix, move):
                  batch_size=4, sam3d_body_model=g.add("SAM3DBody_Loader",
                                                       model_file="sam_3d_body_dinov3_bf16.safetensors")())
     g.add("MomentoGate", pose_data=body(), move=mv, camera=CAMERA, frames=H3_FRAMES, width=W, height=H)
+    if EXPLAIN:  # what the demo shows: the projected skeleton, and the body SAM 3D Body measured, over the take
+        g.add("SaveVideo", video=g.add("CreateVideo", fps=float(FPS), images=pose())(), filename_prefix=prefix + "_pose",
+              format="mp4", codec="h264")
+        g.add("SaveImage", filename_prefix=prefix + "_body",
+              images=g.add("SAM3DBody_Render", pose_data=body(), width=W, height=H, background=picks(0),
+                           **{"render_style": "mesh", "render_style.shader": "default"})())
     return g
 
 
