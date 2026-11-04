@@ -60,6 +60,21 @@ REVERSE = os.environ.get("REVERSE") or {"smartphone": "phone landscape", "dslr":
 # skeletons (SDPose, whole body) of the films' photographer poses, each extracted from the source cropped to the
 # photographer's upper body in the frame's own aspect, so the skeleton fills the frame where they will be
 POSES = Path(__file__).parent / "poses"
+CLOSE = 0.55  # the reverse shot frames chest-up: the top 55% of the posed (waist-up) frame, around the face
+
+
+def chest_up(im, pose):
+    """The reverse shot's framing, cut from the waist-up posed frame (posing a whole upright torso keeps them
+    standing; a chest-up skeleton has no hips and the model crouched them): the top CLOSE of the frame, in the
+    frame's aspect, centred on the face (the skeleton's face points, white, in its top third)."""
+    sk = np.asarray(pose.convert("RGB").resize(im.size))
+    top = sk[: im.height // 3]
+    ys, xs = np.nonzero((top > 200).all(2))
+    cx = int(xs.mean()) if len(xs) else im.width // 2
+    h = round(im.height * CLOSE)
+    w = round(h * W / H)
+    x0 = max(0, min(im.width - w, cx - w // 2))
+    return im.crop((x0, 0, x0 + w, h)).resize((W, H), Image.LANCZOS)
 # the pose ControlNet is built for the Qwen-Image 2.1 base model at ~40 steps; on Turbo it barely holds the skeleton
 QWEN_BASE, QWEN_STEPS = "qwen_image_2.1_int8_convrot.safetensors", 40
 HEAD_SWAP = "bfs_head_v1.1_qwen_2.1.safetensors"  # Alissonerdx/BFS-Best-Face-Swap, MIT
@@ -523,10 +538,10 @@ def main(profile, post, out="out"):
             files = run(reverse_still(pu, su, comfy.upload(str(od / f"{tag}_sheet.png"), f"momento_{tag}_sheet.png"),
                                       plan, seed, f"momento/{tag}", pose))
             fetch(files["revstill"][0], od / f"{tag}_revstill.png")
-            # the still and its skeleton are both in the frame's aspect already: scaled, never cropped
-            for src, dst in ((od / f"{tag}_revstill.png", od / f"{tag}_revkey.png"),
-                             (POSES / f"{REVERSE.replace(' ', '_')}.png", od / f"{tag}_revpose.png")):
-                Image.open(src).convert("RGB").resize((W, H), Image.LANCZOS).save(dst)
+            # framed chest-up, the still and its skeleton cut identically
+            skel = Image.open(POSES / f"{REVERSE.replace(' ', '_')}.png")
+            chest_up(Image.open(od / f"{tag}_revstill.png").convert("RGB"), skel).save(od / f"{tag}_revkey.png")
+            chest_up(skel.convert("RGB").resize((768, 1312)), skel).save(od / f"{tag}_revpose.png")
             files = run(reverse_film(comfy.upload(str(od / f"{tag}_revkey.png"), f"momento_{tag}_revkey.png"),
                                      comfy.upload(str(od / f"{tag}_revpose.png"), f"momento_{tag}_revpose.png"),
                                      plan, seed, f"momento/{tag}", post=su))
