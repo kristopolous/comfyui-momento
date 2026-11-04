@@ -56,6 +56,22 @@ what the feature is for, and where it is in the code.
 FLUX 3 makes every still that the video models film between: the character sheet, the filled-in 3D view, and the
 photographer placed in the scene. Momento uses both forms of it.
 
+**What changed.** Momento has to tell an image model where a person stands as a number, not a sentence. The camera
+position comes out of a 3D reconstruction, so the person's place in the frame is computed, and the model has to
+accept it as coordinates. FLUX 3 is
+[natively trained on layout](https://docs.bfl.ai/flux_3/flux3_image_bounding_boxes): boxes as `[top, left, bottom,
+right]` on a 0–1000 grid, written straight into the prompt. Editing works the same way: a row can take a region from
+a reference image (`from: "ref_image_0"`, `src_bbox`) and put it at a target box, and pixels outside the edited boxes
+stay as they were. [FLUX 3 Image Klein](https://bfl.ai/blog/flux-3-image-klein) (October 15, 2026) brought this to
+open weights:
+- a 5.6B model, up to 10 reference images, the same layout boxes and pixel-exact editing as FLUX 3 Image;
+- 5.6 GB of generator weights in FP8, and an INT8 build that runs in as little as 8 GB of VRAM;
+- by BFL's own evals, +91 Elo in text-to-image and +70 in editing over FLUX.2 [klein] 9B, with 38% fewer
+  parameters.
+
+That's what lets this run locally: a 24 GB card holds Klein next to the video model, with room for several
+placements per take, each checked by measurement.
+
 - **FLUX 3 Klein, open weights, on your own GPU.** The int8 `flux3-image-klein-int8-convrot` checkpoint with its
   Qwen3-VL 4B text encoder and the FLUX.2 VAE. It runs in 16 steps at CFG 1, so a 24 GB card can afford several
   candidates per take (`scripts/local.py`, `klein()`).
@@ -83,8 +99,21 @@ photographer placed in the scene. Momento uses both forms of it.
 
 ### LTX-2.5 (Lightricks)
 
-LTX-2.5 films the moment in the app (`comfyui_momento/graph.py`) and repaints the photographer through time in
-the cloud pipeline (`scripts/moment.py`, stage D).
+LTX-2.5 films the moment in the app (`comfyui_momento/graph.py`): the shot being taken and the place's sound, in one
+pass, from FLUX 3's first frame to the real post as the last.
+
+**What changed.** [LTX-2.5](https://github.com/Lightricks/LTX-2) (August 2026) is Lightricks' recommended model.
+These are the changes over LTX-2.3 that Lightricks' README and [changelog](https://github.com/Lightricks/LTX-2/blob/main/CHANGELOG.md)
+list:
+- a new text encoder, Gemma 4 12B fine-tuned for LTX with the text projection bundled in (LTX-2.3 used Gemma 3).
+  Momento's director writes long, specific shot descriptions, and this is the part that reads them;
+- a diffusion video decoder alongside the lighter convolutional one, for sharper detail at the cost of decode time;
+- a duration head that can predict the clip length from the prompt;
+- keyframe-aware decoding and keyframe-guide bindings, and chunked generation for long videos;
+- weights published one file per component, which is how ComfyUI's int8 repacks load the transformer, the text
+  encoder and both VAEs separately.
+
+Joint audio and video is an LTX-2 family feature that LTX-2.3 already had. Momento uses it for the place's sound.
 
 - **The 22B distilled model in int8**, `ltx-2.5-22b-distilled-transformer-comfy-int8-convrot`, with the Gemma 4 12B
   text encoder. Momento runs only the distilled first stage, an 8-step manual sigma schedule (`LTX_SIGMAS`), so a
@@ -97,17 +126,13 @@ the cloud pipeline (`scripts/moment.py`, stage D).
   composed.
 - **Keyframes at any frame.** `LTXVAddGuide` with `frame_idx=-1` pins the last frame to the real post, so the shot
   ends exactly on the photo that was taken. `LTXVCropGuides` drops the guide's extra latent before decoding.
-- **In/outpainting IC-LoRA.** In the cloud pipeline, `LTXAddVideoICLoRAGuideAdvanced` with the in/outpainting
-  IC-LoRA and `LTXVInpaintPreprocess` regenerates only the photographer's region, a mask projected from 3D,
-  through the whole clip. The rest of the frame stays as H3 filmed it. It is pinned to placed first and last
-  frames, so the same phone is in the photographer's hands at both ends.
-- **Union Control IC-LoRA.** `scripts/geo.py` drives LTX-2.5 with a depth video rendered along the camera move
-  through the rebuilt place, so the camera follows real geometry. This is one of the experiments the current
-  pipeline grew out of.
+LTX-2.5's generation nodes are built into ComfyUI.
 
-The IC-LoRAs are Lightricks' LTX-2.3 releases (`ltx-2.3-22b-ic-lora-…`), loaded on LTX-2.5 through the
-[ComfyUI-LTXVideo](https://github.com/Lightricks/ComfyUI-LTXVideo) node pack. LTX-2.5's own generation nodes are
-built into ComfyUI.
+**A known mismatch.** The cloud pipeline's photographer pass (`scripts/moment.py`, stage D) and the depth-control
+experiment (`scripts/geo.py`) load Lightricks' LTX-2.3 IC-LoRAs (in/outpainting, union control) on the LTX-2.5
+transformer, through the [ComfyUI-LTXVideo](https://github.com/Lightricks/ComfyUI-LTXVideo) node pack. Lightricks
+says a LoRA only works with the model it was trained on, so those passes are outside what LTX-2.5 supports. The
+current local pipeline (`scripts/moment_local.py`) films its camera moves with MiniMax H3 and doesn't depend on them.
 
 ### ComfyUI and Comfy Cloud
 
