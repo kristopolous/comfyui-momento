@@ -62,7 +62,6 @@ PUSH_TO = 0.6  # when backing up would show what the photo doesn't have, the mov
 REVERSE = os.environ.get("REVERSE", "front") != "none"  # REVERSE=none: no reverse shot, the take ends on the push-in
 # The reverse shot is built from the push-in's own photographer, so the clothes, the camera and the moment carry across
 # the cut; only the face comes from the profile picture.
-BODY_SWAP = "bfs_body_swap_v1.0_qwen_2.1.safetensors"  # Alissonerdx/BFS-Best-Face-Swap, MIT
 FRONT = {"smartphone": "both arms raised, holding an ordinary {shade} smartphone {held} in both hands at eye level in "
                        "front of the face, its back toward the camera, looking at its screen, lips closed, concentrating",
          "dslr": "holding a {shade} DSLR camera with a lens up to the eye in both hands, looking through the viewfinder, "
@@ -468,11 +467,11 @@ def close_still(profile, post, sheet, plan, seed, prefix, name="rear window"):
 def reverse_still(profile, front, held_as, seed, prefix):
     """The reverse shot's still, each tool doing one job, everything but the face carried from the push-in:
     1. the clothes: the character sheet's front view (`front`), the same sheet the push-in's photographer was dressed
-       from, and the body swap's reference in its trained format (standing, facing the camera, plain light
-       background). Turning the push-in's back view around invented a front: an apron, a tie, sunglasses;
-    2. the moment: someone posed with the push-in's grip, at the front three-quarter angle (Qwen-Image 2.1 base);
-    3. the BFS body swap puts the reference's clothes and build on that pose (its documented prompt, image order and
-       reference size); 4. the BFS head swap puts the profile picture's head on them.
+       from. Turning the push-in's back view around invented a front: an apron, a tie, sunglasses;
+    2. the moment: Qwen-Image 2.1's edit re-poses that front view with the push-in's grip, at the front
+       three-quarter angle, keeping all they wear. Posing a stranger and BFS-body-swapping the sheet's clothes on
+       carried the shirt but dropped the backpack on most seeds;
+    3. the BFS head swap puts the profile picture's head on them.
     With it: SDPose's skeleton of the still (H3 holds that pose) and SAM 3's mask of the camera, which the shot
     pushes in on."""
     g = Graph()
@@ -498,22 +497,11 @@ def reverse_still(profile, front, held_as, seed, prefix):
                      face_point_size=3, score_threshold=0.3, draw_head=True)
 
     sdpose = g.add("CheckpointLoaderSimple", ckpt_name="sdpose_wholebody_fp16.safetensors")
-    ref = g.add("LoadImage", image=front)
-    posed = qwen(base, f"A real photo, waist-up, of a person standing upright, seen from the front three-quarter view, "
-                       f"{FRONT[CAMERA].format(held=held_as[0], shade=held_as[1])}, taking a photo of something across the street. Plain light grey "
-                       "background, soft daylight.", seed + 7,
-                 negative="cartoon, 3d render, cgi, plastic skin, deformed hands, extra fingers, text")
-    body = g.add("TextEncodeQwenImage21", clip=clip(), vae=vae(), resolution=0, negative_prompt="",
-                 prompt="body_swap: start with <image1> as the base image, keeping its lighting, environment, and "
-                        "background. replace the body from <image1> with the body from <image2>, strictly preserving "
-                        "the clothing, body shape and proportions from <image2>. copy the pose, direction of the eye, "
-                        "head rotation, micro expressions from <image1>",
-                 **{"images.image_1": posed(), "images.image_2": g.add(
-                     "ImageScaleToTotalPixels", image=ref(0), upscale_method="lanczos", megapixels=0.59,
-                     resolution_steps=32)()})
-    dressed = g.add("VAEDecode", vae=vae(), samples=g.add(
-        "KSampler", model=lora(BODY_SWAP)(), seed=seed + 8, steps=QWEN_STEPS, cfg=1.0, sampler_name="euler",
-        scheduler="simple", positive=body(0), negative=body(1), denoise=1.0, latent_image=body(2))())
+    dressed = qwen(base, "The same person from <image1>, wearing exactly the same clothes and everything they wear, "
+                         "now seen waist-up from the front three-quarter view, "
+                         f"{FRONT[CAMERA].format(held=held_as[0], shade=held_as[1])}, taking a photo of something "
+                         "across the street. Plain light grey background, soft daylight.", seed + 7,
+                   [g.add("LoadImage", image=front)(0)])
     who = qwen(lora(HEAD_SWAP),
                "head_swap: start with <image1> as the base image, keeping its lighting, environment, and background. "
                "remove the head from <image1> completely and replace it with the head from <image2>, strictly "
@@ -523,7 +511,7 @@ def reverse_still(profile, front, held_as, seed, prefix):
     sam = g.add("CheckpointLoaderSimple", ckpt_name="sam3.1_multiplex_fp16.safetensors")
     cam = g.add("SAM3_Detect", model=sam(0), image=who(), threshold=0.3, refine_iterations=2, individual_masks=False,
                 conditioning=g.add("CLIPTextEncode", text=LENS_OF[CAMERA], clip=sam(1))())
-    for k, im in (("revposed", posed), ("revdressed", dressed), ("revwho", who)):
+    for k, im in (("revdressed", dressed), ("revwho", who)):
         g.add("SaveImage", images=im(), filename_prefix=f"{prefix}_{k}")
     g.add("SaveImage", images=skeleton(who())(), filename_prefix=prefix + "_revpose")
     g.add("SaveImage", images=g.add("MaskToImage", mask=cam(0))(), filename_prefix=prefix + "_revcam")
@@ -697,7 +685,7 @@ def reverse(od, tag, pu, su, plan, seed, raw):
     front_view(od / f"{tag}_sheet.png", f"momento/{tag}", od / f"{tag}_revfront.png")
     files = run(reverse_still(pu, comfy.upload(str(od / f"{tag}_revfront.png"), f"momento_{tag}_revfront.png"),
                               held(cu, f"momento/{tag}"), seed, f"momento/{tag}"))
-    for k in ("revposed", "revdressed", "revwho", "revpose", "revcam"):
+    for k in ("revdressed", "revwho", "revpose", "revcam"):
         fetch(files[k][0], od / f"{tag}_{k}.png")
     who, skel, cam = (Image.open(od / f"{tag}_{k}.png") for k in ("revwho", "revpose", "revcam"))
     box = framed(who.size, skel, cam)
