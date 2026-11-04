@@ -42,6 +42,107 @@ Where the photographer stands, and which way they face, isn't left to a prompt. 
    H3's `overall_soundscape` prompt structure gives real ambient sound and a shutter click, with no generated speech.
 6. **Review.** The LLM watches every take and only the best one is kept. Close-ups (a laptop on a desk) have no
    useful depth, so they're routed through FLUX 3 outpainting instead.
+7. **The reverse shot.** The film cuts around to face the photographer as they take the picture, then the shutter
+   fires and it cuts to the real post. The reverse shot is built from the push-in's own photographer, so the clothes,
+   the camera and the way it's held carry across the cut. Only the face comes from the profile picture.
+
+## The sponsors' models, feature by feature
+
+Momento is a showcase of what FLUX 3, LTX-2.5 and current ComfyUI can do together. Below is every feature it uses,
+what the feature is for, and where it is in the code.
+
+### FLUX 3 (Black Forest Labs)
+
+FLUX 3 makes every still that the video models film between: the character sheet, the filled-in 3D view, and the
+photographer placed in the scene. Momento uses both forms of it.
+
+- **FLUX 3 Klein, open weights, on your own GPU.** The int8 `flux3-image-klein-int8-convrot` checkpoint with its
+  Qwen3-VL 4B text encoder and the FLUX.2 VAE. It runs in 16 steps at CFG 1, so a 24 GB card can afford several
+  candidates per take (`scripts/local.py`, `klein()`).
+- **FLUX 3 Image, through Comfy's BFL partner node** (`Flux3ImageNode`), for the Comfy Cloud pipeline
+  (`scripts/moment.py`, `scripts/cloud.py`). There's no local model at all, just a node in the graph.
+- **Multi-reference editing.** Klein takes several reference images through ComfyUI's `ReferenceMultiLatent`, and
+  the prompt cites them as `ref_image_0`, `ref_image_1`, and so on. Momento passes the scene as one reference and
+  the person as another, so the prompt reads like a direction: "add the person from ref_image_1 into ref_image_0 as
+  the photographer, change nothing else". The partner node does the same with `image_1`, `image_2`.
+- **Layout boxes.** FLUX 3 accepts a layout: a JSON table of regions, each with an id, a target box on a 0–1000
+  grid, a description and optionally a source box in a reference image. In Momento those boxes aren't guessed:
+  they're the photographer's head, body and phone, projected from their real 3D position in the rebuilt place
+  (`scripts/geo.py`, `layout()`). So FLUX 3 is told exactly where in the frame a person standing there would appear,
+  and which way they face. On the cloud path the same boxes go through ComfyUI's `CreateBoundingBoxes` node, which
+  has its own box editor in the UI. In the app, the planner's boxes can also say "this region comes from the
+  profile picture, from here": a `src_bbox` in `ref_image_1`.
+- **Character turnaround.** From one profile picture FLUX 3 draws the person front, three-quarter, side and back,
+  camera raised. It's the identity reference for every later placement, so the person is the same from behind as
+  from the front.
+- **Seamless fill.** When the 3D place is seen from where the bystander stands, the camera sees around things and
+  leaves black gaps. FLUX 3 fills them with more of the same place, in the same light and lens, and leaves the real
+  pixels alone.
+- **Outpainting for close-ups.** A post with no usable depth (a laptop on a desk) is zoomed out by FLUX 3 instead:
+  "the same instant, a couple of steps back".
+
+### LTX-2.5 (Lightricks)
+
+LTX-2.5 films the moment in the app (`comfyui_momento/graph.py`) and repaints the photographer through time in
+the cloud pipeline (`scripts/moment.py`, stage D).
+
+- **The 22B distilled model in int8**, `ltx-2.5-22b-distilled-transformer-comfy-int8-convrot`, with the Gemma 4 12B
+  text encoder. Momento runs only the distilled first stage, an 8-step manual sigma schedule (`LTX_SIGMAS`), so a
+  whole moment renders on one 24 GB GPU.
+- **Picture and sound in one pass.** LTX-2.5 generates audio together with the video: `LTXVConcatAVLatent` joins
+  an empty audio latent to the video latent, one sampler denoises both, and `LTXVSeparateAVLatent` splits them for
+  the video and audio VAEs. The place's sound (traffic, surf, a crowd) is made by the same model that makes the
+  picture, in sync with it. The prompt asks for ambient sound only, so nobody speaks.
+- **Image to video, in place.** `LTXVImgToVideoInplace` sets the first frame: the bystander's view that FLUX 3
+  composed.
+- **Keyframes at any frame.** `LTXVAddGuide` with `frame_idx=-1` pins the last frame to the real post, so the shot
+  ends exactly on the photo that was taken. `LTXVCropGuides` drops the guide's extra latent before decoding.
+- **In/outpainting IC-LoRA.** In the cloud pipeline, `LTXAddVideoICLoRAGuideAdvanced` with the in/outpainting
+  IC-LoRA and `LTXVInpaintPreprocess` regenerates only the photographer's region, a mask projected from 3D,
+  through the whole clip. The rest of the frame stays as H3 filmed it. It is pinned to placed first and last
+  frames, so the same phone is in the photographer's hands at both ends.
+- **Union Control IC-LoRA.** `scripts/geo.py` drives LTX-2.5 with a depth video rendered along the camera move
+  through the rebuilt place, so the camera follows real geometry. This is one of the experiments the current
+  pipeline grew out of.
+
+The IC-LoRAs are Lightricks' LTX-2.3 releases (`ltx-2.3-22b-ic-lora-…`), loaded on LTX-2.5 through the
+[ComfyUI-LTXVideo](https://github.com/Lightricks/ComfyUI-LTXVideo) node pack. LTX-2.5's own generation nodes are
+built into ComfyUI.
+
+### ComfyUI and Comfy Cloud
+
+- **App Mode.** `workflows/momento.json` is saved in App Mode (`linearMode`): open it in ComfyUI and you get two
+  inputs (the profile picture and the post) and the finished film, not a node graph.
+- **A custom page served by ComfyUI itself.** The node pack registers routes on ComfyUI's own server
+  (`/momento`, `/momento/run`, `/momento/status/<id>`, in `comfyui_momento/server.py`), and its web directory serves
+  the Instagram-style page. The whole product is one ComfyUI install with no separate backend.
+- **The V3 node API.** Momento's nodes (Plan, Canvas, Fit, Review, Reveal) are written against `comfy_api.latest`
+  (`io.ComfyNode`, `io.Schema`, `ComfyExtension`), with typed video and audio inputs and outputs. `MomentoPlan`
+  shows the plan in the UI as it runs (`ui.PreviewText`).
+- **Partner nodes through the Comfy API.** Gemini 3.1 Pro plans the moment and watches each take as a critic
+  (`GeminiNode`), FLUX 3 Image composes on the cloud path (`Flux3ImageNode`), and MiniMax Music 3 scores the app's
+  version (`ComfyCloudMiniMaxMusic3TextToAudioNode`). They run inside the same graph as the local models, on one
+  `COMFY_API_KEY`.
+- **Comfy Cloud.** `scripts/moment.py` runs the entire pipeline on Comfy Cloud, three takes per post side by side,
+  with nothing downloaded locally.
+- **Native 3D.** Depth Anything 3 (`DA3Inference`, `DA3GeometryToMesh`), `CreateCameraInfo` and `RenderMesh` are
+  built into ComfyUI. The post becomes a textured metric mesh, and any camera in it is a node: the push-in, the
+  framing tilt, and how far back the move can start (measured from `RenderMesh`'s coverage mask).
+- **Native perception.** SAM 3 (`SAM3_Detect`, prompted with a concept and a box), BiRefNet background removal
+  (`RemoveBackground`) and SDPose (`SDPoseKeypointExtractor`) are built in too. Momento uses them to measure
+  instead of trusting a prompt: which person to cut out, a real alpha matte, whether the photographer faces into
+  the scene, how the phone is held.
+- **New-style inputs.** Growing input lists (`images.image_1`, `images.image_2`, …) and inputs that change with a
+  mode (`mode.position_x` on the camera node) are used throughout.
+
+### The other open models
+
+MiniMax H3 films the push-in between two placed keyframes. Its structured prompt (`integrated_multimodal_description`,
+`overall_soundscape`) gives the place's sound, and its Fun ControlNet-Union holds a pose. The reverse shot uses
+Qwen-Image 2.1 with the
+[multiple-angles LoRA](https://huggingface.co/akhaliq/Qwen-Image-2.1-Multiple-Angles-LoRA) (Apache-2.0) and the
+[BFS](https://huggingface.co/Alissonerdx/BFS-Best-Face-Swap) body and head swap LoRAs (MIT). The shutter is a
+recorded Nikon D7100 (CC BY-SA 3.0, see `scripts/sfx/CREDITS.md`).
 
 ## Setup
 
@@ -61,7 +162,8 @@ git clone https://github.com/kristopolous/comfyui-momento
 python -m pip install -r comfyui-momento/scripts/requirements.txt   # in ComfyUI's venv; only for scripts/
 ```
 
-The node pack has no Python dependencies beyond ComfyUI. The page also needs `chromium` (or `google-chrome`) on the
+The node pack has no Python dependencies beyond ComfyUI. The cloud pipeline's LTX IC-LoRA steps also need
+Lightricks' [ComfyUI-LTXVideo](https://github.com/Lightricks/ComfyUI-LTXVideo) node pack in `custom_nodes`. The page also needs `chromium` (or `google-chrome`) on the
 server to read public profiles: `sudo apt install chromium`.
 
 ### 2. Download the models
