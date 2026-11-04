@@ -173,8 +173,9 @@ def download(f, dest):
     Path(dest).write_bytes(retry(requests.get, url, timeout=300).content if url else r.content)
 
 
-def reveal(moment, post, out, hold=1.8, flash=0.25):
-    """Momento Reveal with ffmpeg: the moment, a white flash with a shutter click, then the real post."""
+def reveal(moment, post, out, hold=1.8, flash=0.25, click=True):
+    """Momento Reveal with ffmpeg: the moment, a white flash with a shutter click, then the real post. click=False when
+    the moment already ends on its own shutter."""
     w, h = (int(v) for v in subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v", "-show_entries",
                                              "stream=width,height", "-of", "csv=p=0", moment],
                                             capture_output=True, text=True).stdout.split(",")[:2])
@@ -187,14 +188,15 @@ def reveal(moment, post, out, hold=1.8, flash=0.25):
     pad = f"atrim=0:{length + hold + flash:.3f}"
     bed = (f"[0:a]aresample=48000,aformat=channel_layouts=stereo,apad,{pad},afade=out:st={length:.3f}:d={hold + flash}"
            if has_audio else f"anullsrc=r=48000:cl=stereo,{pad}")  # the scene's sound fades under the post
-    click = "aevalsrc='0.8*(random(0)*2-1)*exp(-t*60)|0.8*(random(1)*2-1)*exp(-t*60)':d=0.15:s=48000"
+    sound = "aevalsrc='0.8*(random(0)*2-1)*exp(-t*60)|0.8*(random(1)*2-1)*exp(-t*60)':d=0.15:s=48000"
     subprocess.run(
         ["ffmpeg", "-v", "error", "-y", "-i", moment, "-loop", "1", "-t", str(hold + flash), "-i", post,
          "-filter_complex",
          f"[1:v]scale={w}:{h}:force_original_aspect_ratio=decrease,pad={w}:{h}:(ow-iw)/2:(oh-ih)/2,fps=24,setsar=1,"
          f"fade=in:st=0:d={flash}:color=white[p];[0:v]scale={w}:{h}:force_original_aspect_ratio=decrease,"
          f"pad={w}:{h}:(ow-iw)/2:(oh-ih)/2,fps=24,setsar=1[m];[m][p]concat=n=2:v=1:a=0[v];"
-         f"{bed}[q];{click},adelay={int(length * 1000)}:all=1[c];[q][c]amix=inputs=2:normalize=0[a]",
+         + (f"{bed}[q];{sound},adelay={int(length * 1000)}:all=1[c];[q][c]amix=inputs=2:normalize=0[a]" if click
+            else f"{bed}[a]"),
          "-map", "[v]", "-map", "[a]", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", out], check=True)
 
 
