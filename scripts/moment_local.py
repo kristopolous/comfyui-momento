@@ -405,15 +405,22 @@ SHUTTER = Path(__file__).parent / "sfx" / "dslr_shutter.wav"  # a real DSLR (see
 
 def cut(take, reverse, out, keep=2.0):
     """The take, then the reverse shot's first `keep` seconds (it starts where the take ends: the same pose), and
-    the shutter on its last beat: a recorded shutter laid in like foley, not whatever H3 may or may not voice."""
+    the shutter on its last beat: a recorded shutter laid in like foley, not whatever H3 may or may not voice.
+    The place keeps sounding across the cut: a stretch of the take's own ambience (from its middle, so nothing
+    audibly repeats) runs under the reverse shot, the way a cut between two angles of one place is mixed."""
+    length = float(subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0",
+                                   str(take)], capture_output=True, text=True, check=True).stdout)
+    bed = max(0.0, length / 2 - keep / 2)
     click_at = keep - 0.25  # the shutter, then a beat of it before the reveal's flash
+    stereo = "aresample=48000,aformat=channel_layouts=stereo"
     subprocess.run(["ffmpeg", "-v", "error", "-y", "-i", str(take), "-i", str(reverse), "-i", str(SHUTTER),
                     "-filter_complex",
                     f"[1:v]trim=0:{keep:.3f},setpts=PTS-STARTPTS[r];"
-                    f"[1:a]atrim=0:{keep:.3f},asetpts=PTS-STARTPTS,aresample=48000,aformat=channel_layouts=stereo[ra];"
+                    f"[0:a]{stereo},asplit=2[ta][tb];"
+                    f"[tb]atrim={bed:.3f}:{bed + keep:.3f},asetpts=PTS-STARTPTS,afade=t=out:st={keep - 0.3:.3f}:d=0.3[amb];"
+                    f"[1:a]atrim=0:{keep:.3f},asetpts=PTS-STARTPTS,{stereo}[ra];"
                     f"[2:a]adelay={int(click_at * 1000)}:all=1,apad,atrim=0:{keep:.3f}[c];"
-                    "[ra][c]amix=inputs=2:normalize=0[rc];"
-                    "[0:a]aresample=48000,aformat=channel_layouts=stereo[ta];"
+                    "[ra][amb][c]amix=inputs=3:normalize=0[rc];"
                     "[0:v][ta][r][rc]concat=n=2:v=1:a=1[v][a]", "-map", "[v]", "-map", "[a]",
                     "-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "14", "-c:a", "aac", str(out)], check=True)
 
