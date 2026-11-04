@@ -30,6 +30,7 @@ import urllib.parse
 from pathlib import Path
 
 import numpy as np
+from scipy import ndimage
 from PIL import Image, ImageDraw
 
 sys.path.insert(0, str(Path(__file__).parent))
@@ -56,7 +57,9 @@ assert PLAN != local.PLAN
 #   smartphone: from the subject's side, the phone held sideways in both hands, its lenses aimed down ours, the eyes
 #   over the top of it (the face stays in view; "phone front"/"phone front mid" hide it behind the phone)
 #   dslr: Rear Window, the eye at the viewfinder, the long lens leaving the frame past us
-REVERSE = os.environ.get("REVERSE") or {"smartphone": "phone landscape", "dslr": "standing dslr"}[CAMERA]
+CANDIDATES, FACE_MAX = 4, 3  # placements tried; face landmarks allowed (a stray dot or two) on someone seen from behind
+COVER_MIN = 0.9  # the share of the opening view's lower two thirds the photo must cover (no floating, invented scenery)
+REVERSE = os.environ.get("REVERSE") or {"smartphone": "standing phone close", "dslr": "standing dslr"}[CAMERA]
 # skeletons (SDPose, whole body) of the films' photographer poses, each extracted from the source cropped to the
 # photographer's upper body in the frame's own aspect, so the skeleton fills the frame where they will be
 POSES = Path(__file__).parent / "poses"
@@ -121,6 +124,28 @@ def framing(post, prefix, eyes=None):
             geo.TARGET = (level[0], ty, level[2])
             print(f"framing: look-at height {ty} m, bottom covered {cover:.2f}", flush=True)
             return
+
+
+def reach(post, prefix, opening):
+    """How far back the camera move may start: along the line from START to `opening`, the farthest point whose
+    view (looking level) the photo covers on at least COVER_MIN of its lower two thirds. Further back, the view is
+    mostly invented: signs float, the bus bends."""
+    g = Graph()
+    m = mesh(g, g.add("LoadImage", image=post)(0))
+    steps = (1.0, 0.75, 0.5, 0.3)
+    eyes = [tuple(a + (b - a) * f for a, b in zip(geo.START, opening)) for f in steps]
+    for i, eye in enumerate(eyes):
+        view = g.add("RenderMesh", mesh=m(), mode="texture", width=W, height=H, background="#000000",
+                     camera_info=camera(g, eye, LEVEL)())
+        g.add("SaveImage", images=g.add("MaskToImage", mask=view(1))(), filename_prefix=f"{prefix}_reach{i}")
+    files = run(g)
+    for i, (f, eye) in enumerate(zip(steps, eyes)):
+        q = urllib.parse.urlencode({k: files[f"reach{i}"][0][k] for k in ("filename", "subfolder", "type")})
+        cover = (np.asarray(Image.open(io.BytesIO(comfy._req(f"/view?{q}"))).convert("L"))[H // 3:] > 127).mean()
+        print(f"camera move at {f:.2f} of its length: lower view covered {cover:.2f}", flush=True)
+        if cover >= COVER_MIN:
+            return eye
+    return eyes[-1]
 
 
 def h3(g, last, prompt, seed, first=None):
@@ -211,16 +236,47 @@ def move_keys(profile, post, box, plan, seed, prefix, opening):
                      camera_info=camera(g, eye, target)())
         ends[name] = klein(g, fill, [view(0)], s_)
         g.add("SaveImage", images=ends[name](), filename_prefix=f"{prefix}_{name}fill")
-    hi = klein(g, PLACE.format(hold=local.CAM["hold"]) + plan["photographer"] + rows(opening_layout(opening)[0]),
-               [ends["open"](), sheet()], seed + 1, width=2 * W, height=2 * H)
-    # an alpha matte (BiRefNet), not a segmentation: soft edges, and everything they carry (a pale backpack too)
-    matte = g.add("RemoveBackground", image=hi(), bg_removal_model=g.add("LoadBackgroundRemovalModel",
-                                                                       bg_removal_name="birefnet.safetensors")())
-    mine = g.add("MaskComposite", destination=matte(0), operation="multiply", x=0, y=0,
-                 source=g.add("ImageToMask", channel="red", image=g.add("LoadImage", image=box)(0))())
-    g.add("SaveImage", images=hi(), filename_prefix=prefix + "_openhi")
-    g.add("SaveImage", images=g.add("MaskToImage", mask=mine())(), filename_prefix=prefix + "_openmask")
+    sam = g.add("CheckpointLoaderSimple", ckpt_name="sam3.1_multiplex_fp16.safetensors")
+    bg = g.add("LoadBackgroundRemovalModel", bg_removal_name="birefnet.safetensors")
+    pose = g.add("CheckpointLoaderSimple", ckpt_name="sdpose_wholebody_fp16.safetensors")
+    for k in range(CANDIDATES):  # several placements; measure() keeps one that faces the right way, whole
+        hi = klein(g, PLACE.format(hold=local.CAM["hold"]) + plan["photographer"] + rows(opening_layout(opening)[0]),
+                   [ends["open"](), sheet()], seed + 1 + 10 * k, width=2 * W, height=2 * H)
+        # which person: SAM 3 prompted with the concept and their 3D box (body, raised arms and phone); their
+        # edges: BiRefNet's alpha, inside that instance (grown a little so hair and fingers keep their soft edge)
+        found = g.add("SAM3_Detect", model=sam(0), image=hi(), threshold=0.3, refine_iterations=2,
+                      individual_masks=False, bboxes=g.add("PrimitiveBoundingBox", **box)(),
+                      conditioning=g.add("CLIPTextEncode", text="person holding a phone or camera", clip=sam(1))())
+        matte = g.add("RemoveBackground", image=hi(), bg_removal_model=bg())
+        mine = g.add("MaskComposite", destination=matte(0), operation="multiply", x=0, y=0,
+                     source=g.add("GrowMask", mask=found(0), expand=12, tapered_corners=True)())
+        skel = g.add("SDPoseDrawKeypoints", keypoints=g.add("SDPoseKeypointExtractor", model=pose(0), vae=pose(2),
+                                                            image=hi(), batch_size=1)(),
+                     draw_body=True, draw_hands=False, draw_face=True, draw_feet=False, stick_width=4,
+                     face_point_size=3, score_threshold=0.3, draw_head=True)
+        g.add("SaveImage", images=hi(), filename_prefix=f"{prefix}_openhi{k}")
+        g.add("SaveImage", images=g.add("MaskToImage", mask=mine())(), filename_prefix=f"{prefix}_openmask{k}")
+        g.add("SaveImage", images=skel(), filename_prefix=f"{prefix}_openpose{k}")
     return g
+
+
+def face_points(skeleton):
+    """How many face landmarks SDPose drew (white dots): seen from behind, facing into the scene, there are none."""
+    a = np.asarray(Image.open(skeleton).convert("RGB")).astype(int)
+    return int(ndimage.label((a > 235).all(2))[1])  # one white disc per landmark
+
+
+def pick(od, tag):
+    """The placement to use: facing into the scene (no face landmarks) and the most of the person in the matte.
+    None when no candidate faces the right way."""
+    best = None
+    for k in range(CANDIDATES):
+        faces = face_points(od / f"{tag}_openpose{k}.png")
+        area = float((np.asarray(Image.open(od / f"{tag}_openmask{k}.png").convert("L")) > 127).mean())
+        print(f"placement {k}: face landmarks {faces}, person {area:.3f} of frame", flush=True)
+        if faces <= FACE_MAX and area > 0.01 and (best is None or area > best[1]):
+            best = (k, area)
+    return None if best is None else best[0]
 
 
 def compose(open_fill, end_fill, hi, cut, opening, first_path, last_path):
@@ -518,14 +574,22 @@ def main(profile, post, out="out"):
     if not os.environ.get("LEVEL"):  # LEVEL=1 keeps the old level camera, for A/B tests
         framing(su, f"momento/{tag}")
     if opening:  # the camera moves: H3 films it between two keyframes holding the one placement
-        box = Image.new("RGB", (2 * W, 2 * H), "black")
-        y0, x0, y1, x1 = opening_layout(opening)[1]
-        ImageDraw.Draw(box).rectangle((x0 * W / 500, y0 * H / 500, x1 * W / 500, y1 * H / 500), fill="white")
-        box.save(od / f"{tag}_openbox.png")
-        files = run(move_keys(pu, su, comfy.upload(str(od / f"{tag}_openbox.png"), f"momento_{tag}_openbox.png"),
-                              plan, seed, f"momento/{tag}", opening))
-        for k in ("sheet", "openfill", "endfill", "openhi", "openmask"):
+        opening = reach(su, f"momento/{tag}", opening)
+        y0, x0, y1, x1 = opening_layout(opening)[1]  # SAM's prompt: their 3D box, widened for raised arms and phone
+        wide = 0.35 * (x1 - x0)
+        box = dict(x=round(max(0, x0 - wide) * W / 500), y=0, width=round((min(1000, x1 + wide) - max(0, x0 - wide)) * W / 500),
+                   height=round(y1 * H / 500))
+        files = run(move_keys(pu, su, box, plan, seed, f"momento/{tag}", opening))
+        for k in ("sheet", "openfill", "endfill"):
             fetch(files[k][0], od / f"{tag}_{k}.png")
+        for i in range(CANDIDATES):
+            for k in ("openhi", "openmask", "openpose"):
+                fetch(files[f"{k}{i}"][0], od / f"{tag}_{k}{i}.png")
+        chosen = pick(od, tag)
+        if chosen is None:
+            raise SystemExit(f"[{tag}] no placement faces into the scene; not rendering a take that would")
+        for k in ("openhi", "openmask", "openpose"):
+            Image.open(od / f"{tag}_{k}{chosen}.png").save(od / f"{tag}_{k}.png")
         compose(*(od / f"{tag}_{k}.png" for k in ("openfill", "endfill", "openhi", "openmask")), opening,
                 od / f"{tag}_first.png", od / f"{tag}_last.png")
         files = run(move_film(*(comfy.upload(str(od / f"{tag}_{k}.png"), f"momento_{tag}_{k}.png")
