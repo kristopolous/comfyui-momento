@@ -3,7 +3,7 @@
     COMFY_URL=... PLANNER_URL=... PLANNER_MODEL=... python scripts/moment_local.py profile.jpg post.jpg [more posts...]
 
 Same steps as moment.py; only the hosted nodes are replaced: FLUX 3 Image -> FLUX 3 Klein, Gemini -> the local planner.
-  0. Framing: the bystander tilts up until the post covers the bottom of the frame (measured on the 3D render),
+  0. Framing: the bystander's lens and tilt are the widest at which the post fills the frame (measured on the 3D render),
      so nothing below the photo has to be invented (that strip is where a sidewalk grew halfway up the bus).
   A. Plan; character sheet; the instant (the post's 3D place seen from the bystander, gaps filled seamlessly).
   B. MiniMax H3 films the scene with no photographer, camera nearly still, ending on the instant.
@@ -58,15 +58,15 @@ assert PLAN != local.PLAN
 #   over the top of it (the face stays in view; "phone front"/"phone front mid" hide it behind the phone)
 #   dslr: Rear Window, the eye at the viewfinder, the long lens leaving the frame past us
 CANDIDATES, FACE_MAX = 4, 3  # placements tried; face landmarks allowed (a stray dot or two) on someone seen from behind
-COVER_MIN = 0.9  # the share of the opening view's lower two thirds the photo must cover (no floating, invented scenery)
+PUSH_TO = 0.6  # when backing up would show what the photo doesn't have, the move pushes in from START to here (x START)
 REVERSE = os.environ.get("REVERSE", "front") != "none"  # REVERSE=none: no reverse shot, the take ends on the push-in
 # The reverse shot is built from the push-in's own photographer, so the clothes, the camera and the moment carry across
 # the cut; only the face comes from the profile picture.
-TURN = "qwen21_multiple_angles_v2_step1500.safetensors"  # akhaliq/Qwen-Image-2.1-Multiple-Angles-LoRA, Apache-2.0
 BODY_SWAP = "bfs_body_swap_v1.0_qwen_2.1.safetensors"  # Alissonerdx/BFS-Best-Face-Swap, MIT
-FRONT = {"smartphone": "both arms raised, holding an ordinary smartphone {held} in both hands at eye level in front of "
-                       "the face, its back toward the camera, looking at its screen",
-         "dslr": "holding a DSLR camera with a lens up to the eye in both hands, looking through the viewfinder"}
+FRONT = {"smartphone": "both arms raised, holding an ordinary {shade} smartphone {held} in both hands at eye level in "
+                       "front of the face, its back toward the camera, looking at its screen, lips closed, concentrating",
+         "dslr": "holding a {shade} DSLR camera with a lens up to the eye in both hands, looking through the viewfinder, "
+                 "lips closed, concentrating{held:.0}"}
 LENS_OF = {"smartphone": "phone", "dslr": "camera"}  # what SAM 3 finds as the camera the shot pushes in on
 FRAME_H = 0.69  # the reverse shot's framing: the top 69% of the waist-up still, head to mid-chest
 REV_SCALE, REV_FRAMES = 1.5, 39  # rendered at 1.5x so the push-in on the camera stays sharp; H3's 17k+5, ~1.6 s
@@ -89,8 +89,9 @@ def cutout(hi, matte, path):
 
 
 def held(cut, prefix):
-    """How the push-in's photographer holds the camera, measured: SAM 3's mask of it in the cut-out, taller than wide
-    is upright, else sideways. The reverse shot poses the same grip."""
+    """How the push-in's photographer holds the camera, measured from SAM 3's mask of it in the cut-out: taller than
+    wide is upright, else sideways; and its shade, from the camera's own pixels (black or silver). The reverse shot
+    poses the same grip and the same camera. -> (way, shade)"""
     g = Graph()
     sam = g.add("CheckpointLoaderSimple", ckpt_name="sam3.1_multiplex_fp16.safetensors")
     found = g.add("SAM3_Detect", model=sam(0), image=g.add("LoadImage", image=cut)(0), threshold=0.3,
@@ -99,10 +100,44 @@ def held(cut, prefix):
     g.add("SaveImage", images=g.add("MaskToImage", mask=found(0))(), filename_prefix=prefix + "_heldcam")
     f = run(g)["heldcam"][0]
     q = urllib.parse.urlencode({k: f[k] for k in ("filename", "subfolder", "type")})
-    ys, xs = np.nonzero(np.asarray(Image.open(io.BytesIO(comfy._req(f"/view?{q}"))).convert("L")) > 127)
+    mask = np.asarray(Image.open(io.BytesIO(comfy._req(f"/view?{q}"))).convert("L")) > 127
+    ys, xs = np.nonzero(mask)
     way = "upright" if len(xs) and np.ptp(ys) > np.ptp(xs) else "sideways"
-    print(f"the push-in's {LENS_OF[CAMERA]} is held {way}", flush=True)
-    return way
+    pixels = np.asarray(Image.open(io.BytesIO(comfy._req(f"/view?{urllib.parse.urlencode(dict(filename=cut, type='input'))}")))
+                        .convert("L").resize(mask.shape[::-1]))
+    rim = mask & ~ndimage.binary_erosion(mask, iterations=max(1, round(0.15 * min(np.ptp(ys), np.ptp(xs))))) \
+        if len(xs) else mask  # its frame: from behind, the middle is the lit screen
+    shade = "black" if not rim.any() or np.median(pixels[rim]) < 90 else "silver"
+    print(f"the push-in's {LENS_OF[CAMERA]} is {shade}, held {way}", flush=True)
+    return way, shade
+
+
+def front_view(sheet, prefix, path):
+    """The character sheet's front view, on a plain light square (the BFS body swap's reference format). BiRefNet's
+    alpha separates the figures from the sheet's studio backdrop; the empty columns between them split them; the
+    front view is the first, left to right."""
+    g = Graph()
+    matte = g.add("RemoveBackground", image=g.add("LoadImage", image=comfy.upload(str(sheet)))(0),
+                  bg_removal_model=g.add("LoadBackgroundRemovalModel", bg_removal_name="birefnet.safetensors")())
+    g.add("SaveImage", images=g.add("MaskToImage", mask=matte(0))(), filename_prefix=prefix + "_figures")
+    f = run(g)["figures"][0]
+    q = urllib.parse.urlencode({k: f[k] for k in ("filename", "subfolder", "type")})
+    im = Image.open(sheet).convert("RGB")
+    alpha = np.asarray(Image.open(io.BytesIO(comfy._req(f"/view?{q}"))).convert("L").resize(im.size)) / 255
+    runs, n = ndimage.label(alpha.max(0) > 0.5)
+    if not n:
+        raise SystemExit(f"no figure found on the character sheet {sheet}")
+    xs = np.nonzero(runs == 1)[0]
+    alpha = alpha * (runs == 1)[None]  # only the first figure, none of its neighbour's arm
+    a = np.asarray(im).astype(float)
+    flat = Image.fromarray((a * alpha[..., None] + 225 * (1 - alpha[..., None])).astype(np.uint8))  # on light grey
+    ys = np.nonzero(alpha[:, xs].max(1) > 0.5)[0]
+    fig = flat.crop((max(0, xs[0] - 8), max(0, ys[0] - 8), min(im.width, xs[-1] + 9), min(im.height, ys[-1] + 9)))
+    side = max(fig.size)
+    sq = Image.new("RGB", (side, side), (225, 225, 225))
+    sq.paste(fig, ((side - fig.width) // 2, (side - fig.height) // 2))
+    sq.save(path)
+    print(f"character sheet: {n} figures, the front view at x {xs[0]}-{xs[-1]}", flush=True)
 
 
 def framed(size, skeleton, cam):
@@ -121,7 +156,9 @@ def framed(size, skeleton, cam):
 # the pose ControlNet is built for the Qwen-Image 2.1 base model at ~40 steps; on Turbo it barely holds the skeleton
 QWEN_BASE, QWEN_STEPS = "qwen_image_2.1_int8_convrot.safetensors", 40
 HEAD_SWAP = "bfs_head_v1.1_qwen_2.1.safetensors"  # Alissonerdx/BFS-Best-Face-Swap, MIT
-TILTS = [round(-0.1 + 0.2 * i, 1) for i in range(12)]  # look-at heights 4 m out, level to ~20 degrees up
+TILTS = [round(-0.5 + 0.2 * i, 1) for i in range(14)]  # look-at heights 4 m out, a little down to ~20 degrees up
+LENSES = (62.0, 56.0, 52.0, 48.0, 44.0, 40.0)  # the bystander's vertical fov: the widest one the photo fills
+COVER_FRAME = 0.85  # what's left is thin slivers behind near things (the view is off to the side), filled
 
 
 def mesh(g, shot, sky=False):
@@ -142,52 +179,63 @@ def camera(g, eye=None, target=None):
 
 
 def framing(post, prefix, eyes=None):
-    """Sets geo.TARGET: the least upward tilt at which the post covers the bottom twentieth of the bystander's frame
-    (the render's coverage mask) from every one of `eyes` (default: START). Below the post's own bottom edge there is
-    nothing real to show."""
+    """Sets geo.LENS and geo.TARGET: the widest lens (of LENSES) and its tilt at which the post covers at least
+    COVER_FRAME of the bystander's whole frame (the render's coverage mask, the photo's own sky included) from every
+    one of `eyes` (default: START). A lens wider than the photo sees past its edges, where there is nothing real:
+    that is where the signs floated, their poles outside the photo."""
     g, level, eyes = Graph(), geo.TARGET, eyes or [geo.START]
-    m = mesh(g, g.add("LoadImage", image=post)(0))
-    for i, ty in enumerate(TILTS):
-        geo.TARGET = (level[0], ty, level[2])
-        for j, eye in enumerate(eyes):
-            view = g.add("RenderMesh", mesh=m(), mode="texture", width=W, height=H, background="#000000",
-                         camera_info=camera(g, eye)())
-            g.add("SaveImage", images=g.add("MaskToImage", mask=view(1))(), filename_prefix=f"{prefix}_cover{i}e{j}")
+    m = mesh(g, g.add("LoadImage", image=post)(0), sky=True)
+    for a, lens in enumerate(LENSES):
+        geo.LENS = lens
+        for i, ty in enumerate(TILTS):
+            for j, eye in enumerate(eyes):
+                view = g.add("RenderMesh", mesh=m(), mode="texture", width=W, height=H, background="#000000",
+                             camera_info=camera(g, eye, (level[0], ty, level[2]))())
+                g.add("SaveImage", images=g.add("MaskToImage", mask=view(1))(),
+                      filename_prefix=f"{prefix}_cover{a}t{i}e{j}")
     files = run(g)
-    for i, ty in enumerate(TILTS):
-        covers = []
+
+    def cover(a, i):
+        out = []
         for j in range(len(eyes)):
-            f = files[f"cover{i}e{j}"][0]
+            f = files[f"cover{a}t{i}e{j}"][0]
             q = urllib.parse.urlencode({k: f[k] for k in ("filename", "subfolder", "type")})
-            covers.append((np.asarray(Image.open(io.BytesIO(comfy._req(f"/view?{q}"))).convert("L"))[-H // 20:]
-                           > 127).mean())
-        cover = min(covers)
-        if cover >= 0.85 or ty == TILTS[-1]:
-            geo.TARGET = (level[0], ty, level[2])
-            print(f"framing: look-at height {ty} m, bottom covered {cover:.2f}", flush=True)
-            return
+            out.append((np.asarray(Image.open(io.BytesIO(comfy._req(f"/view?{q}"))).convert("L")) > 127).mean())
+        return min(out)
+
+    best = None  # the widest lens that reaches COVER_FRAME, else the best covered of all
+    for a, lens in enumerate(LENSES):
+        here = max((cover(a, i), lens, ty) for i, ty in enumerate(TILTS))
+        if here[0] >= COVER_FRAME:
+            best = here
+            break
+        best = max(best or here, here)
+    cover_, geo.LENS, ty = best
+    geo.TARGET = (level[0], ty, level[2])
+    print(f"framing: lens {geo.LENS:.0f} deg, look-at height {ty} m, frame covered {cover_:.2f}", flush=True)
 
 
 def reach(post, prefix, opening):
     """How far back the camera move may start: along the line from START to `opening`, the farthest point whose
-    view (looking level) the photo covers on at least COVER_MIN of its lower two thirds. Further back, the view is
-    mostly invented: signs float, the bus bends."""
+    view the photo covers on at least COVER_FRAME of the whole frame, as framing() asks of START. Further back, the
+    view is mostly invented: signs float, a car grows under the bus. None if no point is: then the move can't back
+    up at all."""
     g = Graph()
-    m = mesh(g, g.add("LoadImage", image=post)(0))
+    m = mesh(g, g.add("LoadImage", image=post)(0), sky=True)
     steps = (1.0, 0.75, 0.5, 0.3)
     eyes = [tuple(a + (b - a) * f for a, b in zip(geo.START, opening)) for f in steps]
     for i, eye in enumerate(eyes):
         view = g.add("RenderMesh", mesh=m(), mode="texture", width=W, height=H, background="#000000",
-                     camera_info=camera(g, eye, LEVEL)())
+                     camera_info=camera(g, eye)())
         g.add("SaveImage", images=g.add("MaskToImage", mask=view(1))(), filename_prefix=f"{prefix}_reach{i}")
     files = run(g)
     for i, (f, eye) in enumerate(zip(steps, eyes)):
         q = urllib.parse.urlencode({k: files[f"reach{i}"][0][k] for k in ("filename", "subfolder", "type")})
-        cover = (np.asarray(Image.open(io.BytesIO(comfy._req(f"/view?{q}"))).convert("L"))[H // 3:] > 127).mean()
-        print(f"camera move at {f:.2f} of its length: lower view covered {cover:.2f}", flush=True)
-        if cover >= COVER_MIN:
+        cover = (np.asarray(Image.open(io.BytesIO(comfy._req(f"/view?{q}"))).convert("L")) > 127).mean()
+        print(f"camera move at {f:.2f} of its length: frame covered {cover:.2f}", flush=True)
+        if cover >= COVER_FRAME:
             return eye
-    return eyes[-1]
+    return None
 
 
 def h3(g, last, prompt, seed, first=None):
@@ -246,18 +294,15 @@ def mask_video(path, pad=None):
     tmp.cleanup()
 
 
-LEVEL = geo.TARGET  # the opening of a move looks level; framing() tilts only the close end
 PLACE = ("Add the person from ref_image_1's character sheet into ref_image_0 as the photographer: in the foreground, "
          "seen from behind and slightly to the side, turned toward the subject, {hold}, aimed at the subject, taking "
          "a photo. Same hair and clothes as the sheet. Exactly one photographer. Change nothing else in ref_image_0. ")
 
 
 def opening_layout(opening):
-    end, geo.TARGET = geo.TARGET, LEVEL
-    try:
-        return geo.layout(opening, CAMERA), geo.box(BODY, opening)
-    finally:
-        geo.TARGET = end
+    """The move holds framing()'s tilt from end to end: looking level at the opening showed the ground below the
+    photo's bottom edge, which isn't in it."""
+    return geo.layout(opening, CAMERA), geo.box(BODY, opening)
 
 
 def move_keys(profile, post, box, plan, seed, prefix, opening):
@@ -273,7 +318,7 @@ def move_keys(profile, post, box, plan, seed, prefix, opening):
             "fill them seamlessly with more of the same place, same light, same lens. Keep everything else in "
             "ref_image_0 exactly as it is. No people in the foreground. " + plan["scene"])
     ends = {}
-    for name, eye, target, s_ in (("open", opening, LEVEL, seed + 2), ("end", geo.START, geo.TARGET, seed)):
+    for name, eye, target, s_ in (("open", opening, geo.TARGET, seed + 2), ("end", geo.START, geo.TARGET, seed)):
         view = g.add("RenderMesh", mesh=m(), mode="texture", width=W, height=H, background="#000000",
                      camera_info=camera(g, eye, target)())
         ends[name] = klein(g, fill, [view(0)], s_)
@@ -292,6 +337,12 @@ def move_keys(profile, post, box, plan, seed, prefix, opening):
         matte = g.add("RemoveBackground", image=hi(), bg_removal_model=bg())
         mine = g.add("MaskComposite", destination=matte(0), operation="multiply", x=0, y=0,
                      source=g.add("GrowMask", mask=found(0), expand=12, tapered_corners=True)())
+        # the camera itself: SAM 3's instance, solid. BiRefNet reads a phone screen showing the street as background,
+        # and the push-in's phone went see-through
+        held_cam = g.add("SAM3_Detect", model=sam(0), image=hi(), threshold=0.3, refine_iterations=2,
+                         individual_masks=False, bboxes=g.add("PrimitiveBoundingBox", **box)(),
+                         conditioning=g.add("CLIPTextEncode", text=LENS_OF[CAMERA], clip=sam(1))())
+        mine = g.add("MaskComposite", destination=mine(), source=held_cam(0), operation="add", x=0, y=0)
         skel = g.add("SDPoseDrawKeypoints", keypoints=g.add("SDPoseKeypointExtractor", model=pose(0), vae=pose(2),
                                                             image=hi(), batch_size=1)(),
                      draw_body=True, draw_hands=False, draw_face=True, draw_feet=False, stick_width=4,
@@ -328,7 +379,7 @@ def compose(open_fill, end_fill, hi, cut, opening, first_path, last_path):
     hi, cut = Image.open(hi).convert("RGB"), Image.open(cut).convert("L")  # the alpha matte, as is
     f0.paste(hi.resize((W, H), Image.LANCZOS), (0, 0), cut.resize((W, H), Image.LANCZOS))
     head, chest = (0.0, 0.18, -0.15), (0.0, -0.6, -0.15)
-    (ax, ay), (bx, by) = (geo.project(p, opening, target=LEVEL) for p in (head, chest))
+    (ax, ay), (bx, by) = (geo.project(p, opening) for p in (head, chest))
     (ex, ey), (fx, fy) = (geo.project(p, geo.START) for p in (head, chest))
     k = math.hypot(fx - ex, fy - ey) / math.hypot(bx - ax, by - ay) / 2  # hi is twice the frame
     size = (round(hi.width * k), round(hi.height * k))
@@ -341,7 +392,7 @@ def compose(open_fill, end_fill, hi, cut, opening, first_path, last_path):
 def move_film(first, last, plan, seed, prefix):
     """H3 films the move between the two keyframes, photographer and all: the same person at both ends."""
     g = Graph()
-    text = (f"integrated_multimodal_description: The camera makes {geo.MOVE_WORDS[MOVE]} and tilts up, moving "
+    text = (f"integrated_multimodal_description: The camera makes {geo.MOVE_WORDS[MOVE]}, moving "
             f"through the real space of the place. The photographer in the foreground, seen from behind, "
             f"{local.CAM['act']}. There is exactly one photographer. The subject is in motion and ends exactly in the "
             f"moment of <Picture 2>: {plan['action']} {plan['scene']}"
@@ -414,16 +465,16 @@ def close_still(profile, post, sheet, plan, seed, prefix, name="rear window"):
     return g
 
 
-def reverse_still(profile, cut, way, seed, prefix):
+def reverse_still(profile, front, held_as, seed, prefix):
     """The reverse shot's still, each tool doing one job, everything but the face carried from the push-in:
-    1. the clothes: the push-in's photographer (cut out) turned to face the camera by the multiple-angles LoRA. It
-       keeps the clothes and drops the pose, which makes it the body swap's reference in its trained format
-       (standing, facing the camera, plain light background);
+    1. the clothes: the character sheet's front view (`front`), the same sheet the push-in's photographer was dressed
+       from, and the body swap's reference in its trained format (standing, facing the camera, plain light
+       background). Turning the push-in's back view around invented a front: an apron, a tie, sunglasses;
     2. the moment: someone posed with the push-in's grip, at the front three-quarter angle (Qwen-Image 2.1 base);
     3. the BFS body swap puts the reference's clothes and build on that pose (its documented prompt, image order and
        reference size); 4. the BFS head swap puts the profile picture's head on them.
-    With it: SDPose skeletons of the reference (is it facing the camera?) and of the still (H3 holds that pose), and
-    SAM 3's mask of the camera, which the shot pushes in on."""
+    With it: SDPose's skeleton of the still (H3 holds that pose) and SAM 3's mask of the camera, which the shot
+    pushes in on."""
     g = Graph()
     vae = g.add("VAELoader", vae_name="qwen_image_2.1_vae_bf16.safetensors")
     clip = g.add("CLIPLoader", clip_name="qwen3vl_8b_int8_convrot.safetensors", type="qwen_image", device="default")
@@ -447,13 +498,9 @@ def reverse_still(profile, cut, way, seed, prefix):
                      face_point_size=3, score_threshold=0.3, draw_head=True)
 
     sdpose = g.add("CheckpointLoaderSimple", ckpt_name="sdpose_wholebody_fp16.safetensors")
-    turn = g.add("TextEncodeQwenImage21", clip=clip(), vae=vae(), resolution=1024, negative_prompt="",
-                 prompt="<mva> front view, eye-level shot", **{"images.image_1": g.add("LoadImage", image=cut)(0)})
-    ref = g.add("VAEDecode", vae=vae(), samples=g.add(
-        "KSampler", model=lora(TURN)(), seed=seed + 6, steps=QWEN_STEPS, cfg=1.0, sampler_name="euler",
-        scheduler="simple", positive=turn(0), negative=turn(1), denoise=1.0, latent_image=turn(2))())
+    ref = g.add("LoadImage", image=front)
     posed = qwen(base, f"A real photo, waist-up, of a person standing upright, seen from the front three-quarter view, "
-                       f"{FRONT[CAMERA].format(held=way)}, taking a photo of something across the street. Plain light grey "
+                       f"{FRONT[CAMERA].format(held=held_as[0], shade=held_as[1])}, taking a photo of something across the street. Plain light grey "
                        "background, soft daylight.", seed + 7,
                  negative="cartoon, 3d render, cgi, plastic skin, deformed hands, extra fingers, text")
     body = g.add("TextEncodeQwenImage21", clip=clip(), vae=vae(), resolution=0, negative_prompt="",
@@ -462,7 +509,7 @@ def reverse_still(profile, cut, way, seed, prefix):
                         "the clothing, body shape and proportions from <image2>. copy the pose, direction of the eye, "
                         "head rotation, micro expressions from <image1>",
                  **{"images.image_1": posed(), "images.image_2": g.add(
-                     "ImageScaleToTotalPixels", image=ref(), upscale_method="lanczos", megapixels=0.59,
+                     "ImageScaleToTotalPixels", image=ref(0), upscale_method="lanczos", megapixels=0.59,
                      resolution_steps=32)()})
     dressed = g.add("VAEDecode", vae=vae(), samples=g.add(
         "KSampler", model=lora(BODY_SWAP)(), seed=seed + 8, steps=QWEN_STEPS, cfg=1.0, sampler_name="euler",
@@ -476,9 +523,8 @@ def reverse_still(profile, cut, way, seed, prefix):
     sam = g.add("CheckpointLoaderSimple", ckpt_name="sam3.1_multiplex_fp16.safetensors")
     cam = g.add("SAM3_Detect", model=sam(0), image=who(), threshold=0.3, refine_iterations=2, individual_masks=False,
                 conditioning=g.add("CLIPTextEncode", text=LENS_OF[CAMERA], clip=sam(1))())
-    for k, im in (("revcutref", ref), ("revposed", posed), ("revdressed", dressed), ("revwho", who)):
+    for k, im in (("revposed", posed), ("revdressed", dressed), ("revwho", who)):
         g.add("SaveImage", images=im(), filename_prefix=f"{prefix}_{k}")
-    g.add("SaveImage", images=skeleton(ref())(), filename_prefix=prefix + "_revrefpose")
     g.add("SaveImage", images=skeleton(who())(), filename_prefix=prefix + "_revpose")
     g.add("SaveImage", images=g.add("MaskToImage", mask=cam(0))(), filename_prefix=prefix + "_revcam")
     return g
@@ -648,12 +694,11 @@ def reverse(od, tag, pu, su, plan, seed, raw):
     -> the cut."""
     cutout(od / f"{tag}_openhi.png", od / f"{tag}_openmask.png", od / f"{tag}_revcut.png")
     cu = comfy.upload(str(od / f"{tag}_revcut.png"), f"momento_{tag}_revcut.png")
-    files = run(reverse_still(pu, cu, held(cu, f"momento/{tag}"), seed, f"momento/{tag}"))
-    for k in ("revcutref", "revrefpose", "revposed", "revdressed", "revwho", "revpose", "revcam"):
+    front_view(od / f"{tag}_sheet.png", f"momento/{tag}", od / f"{tag}_revfront.png")
+    files = run(reverse_still(pu, comfy.upload(str(od / f"{tag}_revfront.png"), f"momento_{tag}_revfront.png"),
+                              held(cu, f"momento/{tag}"), seed, f"momento/{tag}"))
+    for k in ("revposed", "revdressed", "revwho", "revpose", "revcam"):
         fetch(files[k][0], od / f"{tag}_{k}.png")
-    if face_points(od / f"{tag}_revrefpose.png") <= FACE_MAX:
-        raise SystemExit(f"[{tag}] the turned-around photographer doesn't face the camera; not dressing the reverse "
-                         "shot from their back")
     who, skel, cam = (Image.open(od / f"{tag}_{k}.png") for k in ("revwho", "revpose", "revcam"))
     box = framed(who.size, skel, cam)
     size = (round(W * REV_SCALE / 32) * 32, round(H * REV_SCALE / 32) * 32)
@@ -689,6 +734,10 @@ def main(profile, post, out="out"):
         framing(su, f"momento/{tag}")
     if opening:  # the camera moves: H3 films it between two keyframes holding the one placement
         opening = reach(su, f"momento/{tag}", opening)
+        if opening is None:  # backing up shows what the photo doesn't have: push in from START instead
+            opening, geo.START = geo.START, tuple(PUSH_TO * v for v in geo.START)
+            framing(su, f"momento/{tag}", eyes=[opening, geo.START])
+            print(f"the move can't back up inside the photo: pushing in from {opening} to {geo.START}", flush=True)
         y0, x0, y1, x1 = opening_layout(opening)[1]  # SAM's prompt: their 3D box, widened for raised arms and phone
         wide = 0.35 * (x1 - x0)
         box = dict(x=round(max(0, x0 - wide) * W / 500), y=0, width=round((min(1000, x1 + wide) - max(0, x0 - wide)) * W / 500),

@@ -52,10 +52,10 @@ def path():
     return [tuple(a + (b - a) * ease(i / (KEYS - 1)) for a, b in zip(START, END)) for i in range(KEYS)]
 
 
-def project(point, eye, target=None, fov=LENS, width=None, height=None):
-    """World point -> pixel, for RenderMesh's look-at camera (Y up). Uses the current W, H and TARGET (set at run
-    time)."""
-    target, width, height = target or TARGET, width or W, height or H
+def project(point, eye, target=None, fov=None, width=None, height=None):
+    """World point -> pixel, for RenderMesh's look-at camera (Y up). Uses the current W, H, TARGET and LENS (set at
+    run time)."""
+    target, width, height, fov = target or TARGET, width or W, height or H, fov or LENS
     f = [t - e for t, e in zip(target, eye)]
     n = math.sqrt(sum(v * v for v in f))
     f = [v / n for v in f]
