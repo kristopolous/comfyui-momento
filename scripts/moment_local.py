@@ -511,7 +511,8 @@ def main(profile, post, out="out"):
         raw, final = od / f"{tag}_raw.mp4", Path(out) / f"{tag}.mp4"
         fetch(files["raw"][0], raw)
         if REVERSE != "none":  # cut to the photographer taking the picture; the shutter ends it
-            pose = comfy.upload(str(POSES / f"{REVERSE.replace(' ', '_')}.png"), f"momento_pose_{REVERSE}.png",)
+            pose = comfy.upload(str(POSES / f"{REVERSE.replace(' ', '_')}.png"),
+                                f"momento_pose_{REVERSE.replace(' ', '_')}.png")
             files = run(reverse_still(pu, su, comfy.upload(str(od / f"{tag}_sheet.png"), f"momento_{tag}_sheet.png"),
                                       plan, seed, f"momento/{tag}", pose))
             fetch(files["revstill"][0], od / f"{tag}_revstill.png")
