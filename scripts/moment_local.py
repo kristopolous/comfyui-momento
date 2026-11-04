@@ -59,37 +59,79 @@ assert PLAN != local.PLAN
 #   dslr: Rear Window, the eye at the viewfinder, the long lens leaving the frame past us
 CANDIDATES, FACE_MAX = 4, 3  # placements tried; face landmarks allowed (a stray dot or two) on someone seen from behind
 COVER_MIN = 0.9  # the share of the opening view's lower two thirds the photo must cover (no floating, invented scenery)
-REVERSE = os.environ.get("REVERSE") or {"smartphone": "standing phone close", "dslr": "standing dslr"}[CAMERA]
-# skeletons (SDPose, whole body) of the films' photographer poses, each extracted from the source cropped to the
-# photographer's upper body in the frame's own aspect, so the skeleton fills the frame where they will be
-POSES = Path(__file__).parent / "poses"
-CLOSE = 0.55  # the reverse shot frames chest-up: the top 55% of the posed (waist-up) frame, around the face
+REVERSE = os.environ.get("REVERSE", "front") != "none"  # REVERSE=none: no reverse shot, the take ends on the push-in
+# The reverse shot is built from the push-in's own photographer, so the clothes, the camera and the moment carry across
+# the cut; only the face comes from the profile picture.
+TURN = "qwen21_multiple_angles_v2_step1500.safetensors"  # akhaliq/Qwen-Image-2.1-Multiple-Angles-LoRA, Apache-2.0
+BODY_SWAP = "bfs_body_swap_v1.0_qwen_2.1.safetensors"  # Alissonerdx/BFS-Best-Face-Swap, MIT
+FRONT = {"smartphone": "both arms raised, holding an ordinary smartphone {held} in both hands at eye level in front of "
+                       "the face, its back toward the camera, looking at its screen",
+         "dslr": "holding a DSLR camera with a lens up to the eye in both hands, looking through the viewfinder"}
+LENS_OF = {"smartphone": "phone", "dslr": "camera"}  # what SAM 3 finds as the camera the shot pushes in on
+FRAME_H = 0.69  # the reverse shot's framing: the top 69% of the waist-up still, head to mid-chest
+REV_SCALE, REV_FRAMES = 1.5, 39  # rendered at 1.5x so the push-in on the camera stays sharp; H3's 17k+5, ~1.6 s
+REV_KEEP = 1.33  # the reverse shot's beat: two thirds of the two seconds it had (it ran long)
+PUNCH, PUNCH_TIME = 1.8, 0.6  # it ends pushing in 1.8x on the camera over its last 0.6 s, as the shutter fires
 
 
-def chest_up(im, pose):
-    """The reverse shot's framing, cut from the waist-up posed frame (posing a whole upright torso keeps them
-    standing; a chest-up skeleton has no hips and the model crouched them): the top CLOSE of the frame, in the
-    frame's aspect, centred on the face (the skeleton's face points, white, in its top third)."""
-    sk = np.asarray(pose.convert("RGB").resize(im.size))
-    top = sk[: im.height // 3]
-    ys, xs = np.nonzero((top > 200).all(2))
-    cx = int(xs.mean()) if len(xs) else im.width // 2
-    h = round(im.height * CLOSE)
+def cutout(hi, matte, path):
+    """The push-in's photographer alone on a plain light square: the multiple-angles LoRA's own input format (it was
+    trained on objects on a plain backdrop; given the whole street it drew studio objects)."""
+    im = np.asarray(Image.open(hi).convert("RGB")).astype(float)
+    a = np.asarray(Image.open(matte).convert("L").resize((im.shape[1], im.shape[0]))).astype(float)[..., None] / 255
+    flat = Image.fromarray((im * a + 215 * (1 - a)).astype(np.uint8))
+    ys, xs = np.nonzero(a[..., 0] > 0.5)
+    y0, y1, x0, x1 = ys.min(), ys.max() + 1, xs.min(), xs.max() + 1
+    side = int(max(y1 - y0, x1 - x0) * 1.15)
+    sq = Image.new("RGB", (side, side), (215, 215, 215))
+    sq.paste(flat.crop((x0, y0, x1, y1)), ((side - (x1 - x0)) // 2, (side - (y1 - y0)) // 2))
+    sq.save(path)
+
+
+def held(cut, prefix):
+    """How the push-in's photographer holds the camera, measured: SAM 3's mask of it in the cut-out, taller than wide
+    is upright, else sideways. The reverse shot poses the same grip."""
+    g = Graph()
+    sam = g.add("CheckpointLoaderSimple", ckpt_name="sam3.1_multiplex_fp16.safetensors")
+    found = g.add("SAM3_Detect", model=sam(0), image=g.add("LoadImage", image=cut)(0), threshold=0.3,
+                  refine_iterations=2, individual_masks=False,
+                  conditioning=g.add("CLIPTextEncode", text=LENS_OF[CAMERA], clip=sam(1))())
+    g.add("SaveImage", images=g.add("MaskToImage", mask=found(0))(), filename_prefix=prefix + "_heldcam")
+    f = run(g)["heldcam"][0]
+    q = urllib.parse.urlencode({k: f[k] for k in ("filename", "subfolder", "type")})
+    ys, xs = np.nonzero(np.asarray(Image.open(io.BytesIO(comfy._req(f"/view?{q}"))).convert("L")) > 127)
+    way = "upright" if len(xs) and np.ptp(ys) > np.ptp(xs) else "sideways"
+    print(f"the push-in's {LENS_OF[CAMERA]} is held {way}", flush=True)
+    return way
+
+
+def framed(size, skeleton, cam):
+    """The reverse shot's framing in the waist-up still (posing a whole upright torso keeps them standing): the top
+    FRAME_H, in the frame's aspect, centred between the face (the skeleton's face points, white) and the camera
+    (SAM 3's mask), so both stay in. -> the crop box."""
+    h = round(size[1] * FRAME_H)
     w = round(h * W / H)
-    x0 = max(0, min(im.width - w, cx - w // 2))
-    return im.crop((x0, 0, x0 + w, h)).resize((W, H), Image.LANCZOS)
+    face = np.nonzero((np.asarray(skeleton.convert("RGB").resize(size))[: size[1] // 2] > 200).all(2))[1]
+    lens = np.nonzero(np.asarray(cam.convert("L").resize(size)) > 127)[1]
+    xs = [v.mean() for v in (face, lens) if len(v)]
+    x0 = round(max(0, min(size[0] - w, (np.mean(xs) if xs else size[0] / 2) - w / 2)))
+    return x0, 0, x0 + w, h
+
+
 # the pose ControlNet is built for the Qwen-Image 2.1 base model at ~40 steps; on Turbo it barely holds the skeleton
 QWEN_BASE, QWEN_STEPS = "qwen_image_2.1_int8_convrot.safetensors", 40
 HEAD_SWAP = "bfs_head_v1.1_qwen_2.1.safetensors"  # Alissonerdx/BFS-Best-Face-Swap, MIT
 TILTS = [round(-0.1 + 0.2 * i, 1) for i in range(12)]  # look-at heights 4 m out, level to ~20 degrees up
 
 
-def mesh(g, shot):
+def mesh(g, shot, sky=False):
+    """The post's 3D place. `sky`: keep the photo's own sky in it (a far backdrop), so every view of the move sees
+    the same real clouds; without it each end's sky is invented separately and H3 races clouds between the two."""
     geom = g.add("DA3Inference", image=shot, resolution=504, resize_method="upper_bound_resize", mode="mono",
                  da3_model=g.add("LoadDA3Model", model_name="depth_anything_3_metric_large.safetensors",
                                  weight_dtype="default")())
     return g.add("DA3GeometryToMesh", da3_geometry=geom(), batch_index=0, decimation=1, discontinuity_threshold=0.04,
-                 confidence_threshold=0.1, use_sky_mask=True, texture=True)
+                 confidence_threshold=0.1, use_sky_mask=not sky, texture=True)
 
 
 def camera(g, eye=None, target=None):
@@ -226,7 +268,7 @@ def move_keys(profile, post, box, plan, seed, prefix, opening):
     who, shot = g.add("LoadImage", image=profile), g.add("LoadImage", image=post)
     sheet = klein(g, SHEET + plan["photographer"], [who(0)], seed, width=768, height=448)
     g.add("SaveImage", images=sheet(), filename_prefix=prefix + "_sheet")
-    m = mesh(g, shot(0))
+    m = mesh(g, shot(0), sky=True)
     fill = ("ref_image_0 is a bystander's view of a real place, with black gaps where the camera sees around things: "
             "fill them seamlessly with more of the same place, same light, same lens. Keep everything else in "
             "ref_image_0 exactly as it is. No people in the foreground. " + plan["scene"])
@@ -372,49 +414,73 @@ def close_still(profile, post, sheet, plan, seed, prefix, name="rear window"):
     return g
 
 
-def reverse_still(profile, post, sheet, plan, seed, prefix, pose):
-    """The reverse shot's still, in two stages, each tool doing one job:
-    1. the pose: Qwen-Image 2.1 (base) held to a film's photographer skeleton by the Fun ControlNet-Union, from a
-       description alone (identity references pull the pose back toward the profile picture's);
-    2. who: the BFS head-swap LoRA (Qwen-Image 2.1) puts the profile picture's head on that person, copying head
-       rotation, eye direction and expression from the posed frame (its documented prompt and image order)."""
+def reverse_still(profile, cut, way, seed, prefix):
+    """The reverse shot's still, each tool doing one job, everything but the face carried from the push-in:
+    1. the clothes: the push-in's photographer (cut out) turned to face the camera by the multiple-angles LoRA. It
+       keeps the clothes and drops the pose, which makes it the body swap's reference in its trained format
+       (standing, facing the camera, plain light background);
+    2. the moment: someone posed with the push-in's grip, at the front three-quarter angle (Qwen-Image 2.1 base);
+    3. the BFS body swap puts the reference's clothes and build on that pose (its documented prompt, image order and
+       reference size); 4. the BFS head swap puts the profile picture's head on them.
+    With it: SDPose skeletons of the reference (is it facing the camera?) and of the still (H3 holds that pose), and
+    SAM 3's mask of the camera, which the shot pushes in on."""
     g = Graph()
     vae = g.add("VAELoader", vae_name="qwen_image_2.1_vae_bf16.safetensors")
-    model = g.add("UNETLoader", unet_name=QWEN_BASE, weight_dtype="default")
-    model = g.add("QwenImageDiffsynthControlnet", model=model(), vae=vae(), strength=1.0,
-                  image=g.add("LoadImage", image=pose)(0),
-                  model_patch=g.add("ModelPatchLoader",
-                                    name="qwen_image_2.1_fun_controlnet_union_int8_convrot.safetensors")())
     clip = g.add("CLIPLoader", clip_name="qwen3vl_8b_int8_convrot.safetensors", type="qwen_image", device="default")
-    enc = g.add("TextEncodeQwenImage21", clip=clip(), vae=vae(), resolution=1024,
-                negative_prompt="cartoon, 3d render, cgi, plastic skin, deformed hands, extra fingers, text",
-                prompt=f"A real cinematic film still, a tight close-up of a photographer, {plan['photographer']}, "
-                       f"{local.CAM['hold']}, taking a photo. Long lens, shallow depth of field, natural light, "
-                       "real skin and real adult hands.")
-    posed = g.add("VAEDecode", vae=vae(), samples=g.add(
-        "KSampler", model=model(), seed=seed + 7, steps=QWEN_STEPS, cfg=1.0, sampler_name="euler", scheduler="simple",
-        positive=enc(0), negative=enc(1), denoise=1.0,
-        latent_image=g.add("EmptyLatentImage", width=768, height=1312, batch_size=1)())())  # the frame's aspect
-    g.add("SaveImage", images=posed(), filename_prefix=prefix + "_revposed")
-    swap = g.add("LoraLoaderModelOnly", lora_name=HEAD_SWAP, strength_model=1.0,
-                 model=g.add("UNETLoader", unet_name=QWEN_BASE, weight_dtype="default")())
-    enc = g.add("TextEncodeQwenImage21", clip=clip(), vae=vae(), resolution=1024, negative_prompt="",
-                prompt="head_swap: start with <image1> as the base image, keeping its lighting, environment, and "
-                       "background. remove the head from <image1> completely and replace it with the head from "
-                       "<image2>, strictly preserving the hair, eye color, nose structure from <image2>. copy the "
-                       "direction of the eye, head rotation, micro expressions from <image1>, high quality, sharp "
-                       "details, 4k",
-                **{"images.image_1": posed(), "images.image_2": g.add("LoadImage", image=profile)(0)})
-    who = g.add("VAEDecode", vae=vae(), samples=g.add(
-        "KSampler", model=swap(), seed=seed + 8, steps=QWEN_STEPS, cfg=1.0, sampler_name="euler", scheduler="simple",
-        positive=enc(0), negative=enc(1), denoise=1.0,
-        latent_image=g.add("EmptyLatentImage", width=768, height=1312, batch_size=1)())())
-    # 3. where: a long lens has nothing sharp behind them, so the background is the real place, defocused: the
-    #    photographer matted (BiRefNet, a real alpha) over the post itself, scaled to the frame and blurred hard
-    #    (no invented scenery behind them; Qwen's own background put a parked car at head height)
-    still = matted(g, who(), defocused(g, post, 768, 1312))
-    g.add("SaveImage", images=who(), filename_prefix=prefix + "_revswapped")
-    g.add("SaveImage", images=still(), filename_prefix=prefix + "_revstill")
+    base = g.add("UNETLoader", unet_name=QWEN_BASE, weight_dtype="default")
+
+    def qwen(model, prompt, seed_, images=(), latent=None, resolution=1024, negative=""):
+        enc = g.add("TextEncodeQwenImage21", clip=clip(), vae=vae(), resolution=resolution, negative_prompt=negative,
+                    prompt=prompt, **{f"images.image_{i + 1}": im for i, im in enumerate(images)})
+        return g.add("VAEDecode", vae=vae(), samples=g.add(
+            "KSampler", model=model(), seed=seed_, steps=QWEN_STEPS, cfg=1.0, sampler_name="euler", scheduler="simple",
+            positive=enc(0), negative=enc(1), denoise=1.0,
+            latent_image=latent or g.add("EmptyLatentImage", width=768, height=1312, batch_size=1)())())
+
+    def lora(name):
+        return g.add("LoraLoaderModelOnly", lora_name=name, strength_model=1.0, model=base())
+
+    def skeleton(im):
+        return g.add("SDPoseDrawKeypoints", keypoints=g.add("SDPoseKeypointExtractor", model=sdpose(0), vae=sdpose(2),
+                                                             image=im, batch_size=1)(),
+                     draw_body=True, draw_hands=False, draw_face=True, draw_feet=False, stick_width=4,
+                     face_point_size=3, score_threshold=0.3, draw_head=True)
+
+    sdpose = g.add("CheckpointLoaderSimple", ckpt_name="sdpose_wholebody_fp16.safetensors")
+    turn = g.add("TextEncodeQwenImage21", clip=clip(), vae=vae(), resolution=1024, negative_prompt="",
+                 prompt="<mva> front view, eye-level shot", **{"images.image_1": g.add("LoadImage", image=cut)(0)})
+    ref = g.add("VAEDecode", vae=vae(), samples=g.add(
+        "KSampler", model=lora(TURN)(), seed=seed + 6, steps=QWEN_STEPS, cfg=1.0, sampler_name="euler",
+        scheduler="simple", positive=turn(0), negative=turn(1), denoise=1.0, latent_image=turn(2))())
+    posed = qwen(base, f"A real photo, waist-up, of a person standing upright, seen from the front three-quarter view, "
+                       f"{FRONT[CAMERA].format(held=way)}, taking a photo of something across the street. Plain light grey "
+                       "background, soft daylight.", seed + 7,
+                 negative="cartoon, 3d render, cgi, plastic skin, deformed hands, extra fingers, text")
+    body = g.add("TextEncodeQwenImage21", clip=clip(), vae=vae(), resolution=0, negative_prompt="",
+                 prompt="body_swap: start with <image1> as the base image, keeping its lighting, environment, and "
+                        "background. replace the body from <image1> with the body from <image2>, strictly preserving "
+                        "the clothing, body shape and proportions from <image2>. copy the pose, direction of the eye, "
+                        "head rotation, micro expressions from <image1>",
+                 **{"images.image_1": posed(), "images.image_2": g.add(
+                     "ImageScaleToTotalPixels", image=ref(), upscale_method="lanczos", megapixels=0.59,
+                     resolution_steps=32)()})
+    dressed = g.add("VAEDecode", vae=vae(), samples=g.add(
+        "KSampler", model=lora(BODY_SWAP)(), seed=seed + 8, steps=QWEN_STEPS, cfg=1.0, sampler_name="euler",
+        scheduler="simple", positive=body(0), negative=body(1), denoise=1.0, latent_image=body(2))())
+    who = qwen(lora(HEAD_SWAP),
+               "head_swap: start with <image1> as the base image, keeping its lighting, environment, and background. "
+               "remove the head from <image1> completely and replace it with the head from <image2>, strictly "
+               "preserving the hair, eye color, nose structure from <image2>. copy the direction of the eye, head "
+               "rotation, micro expressions from <image1>, high quality, sharp details, 4k", seed + 9,
+               [dressed(), g.add("LoadImage", image=profile)(0)])
+    sam = g.add("CheckpointLoaderSimple", ckpt_name="sam3.1_multiplex_fp16.safetensors")
+    cam = g.add("SAM3_Detect", model=sam(0), image=who(), threshold=0.3, refine_iterations=2, individual_masks=False,
+                conditioning=g.add("CLIPTextEncode", text=LENS_OF[CAMERA], clip=sam(1))())
+    for k, im in (("revcutref", ref), ("revposed", posed), ("revdressed", dressed), ("revwho", who)):
+        g.add("SaveImage", images=im(), filename_prefix=f"{prefix}_{k}")
+    g.add("SaveImage", images=skeleton(ref())(), filename_prefix=prefix + "_revrefpose")
+    g.add("SaveImage", images=skeleton(who())(), filename_prefix=prefix + "_revpose")
+    g.add("SaveImage", images=g.add("MaskToImage", mask=cam(0))(), filename_prefix=prefix + "_revcam")
     return g
 
 
@@ -440,8 +506,8 @@ def matted(g, images, plate, frames=1):
 def reverse_film(still, pose, plan, seed, prefix, post=None):
     """H3 animates the reverse shot, the camera locked off. It continues the cut: the push-in ends on the placed
     keyframe, camera already up, so the pose is held there (the Fun ControlNet-Union on the same skeleton, every
-    frame), and the shutter fires at the end."""
-    g = Graph()
+    frame), and the shutter fires at the end. Rendered at REV_SCALE, for the push-in on the camera."""
+    g, w, h = Graph(), round(W * REV_SCALE / 32) * 32, round(H * REV_SCALE / 32) * 32
     text = ("integrated_multimodal_description: A tight cinematic close-up, the camera locked off on a long lens. The "
             f"photographer, {local.CAM['hold']}, holds it steady, intent behind the camera, and presses the shutter "
             "at the very end. Shallow depth of field, the background soft."
@@ -453,8 +519,9 @@ def reverse_film(still, pose, plan, seed, prefix, post=None):
     model = g.add("MiniMaxH3FunControlNetApply", model=model(), vae=vae(), strength=1.0, start_percent=0.0,
                   end_percent=1.0, model_patch=g.add(
                       "ModelPatchLoader", name="minimax_h3_fun_controlnet_union_2.0_pruned_int8_convrot.safetensors")(),
-                  control_video=g.add("RepeatImageBatch", image=g.add("LoadImage", image=pose)(0), amount=73)())
-    cond = g.add("MiniMaxH3ImageToVideo", prompt=text, width=W, height=H, length=73, vae=vae(),
+                  control_video=g.add("RepeatImageBatch", image=g.add("LoadImage", image=pose)(0),
+                                      amount=REV_FRAMES)())
+    cond = g.add("MiniMaxH3ImageToVideo", prompt=text, width=w, height=h, length=REV_FRAMES, vae=vae(),
                  first_frame=g.add("LoadImage", image=still)(0),
                  clip=g.add("CLIPLoader", clip_name=H3["clip"], type="minimax", device="default")())
     out = g.add("SamplerCustomAdvanced", noise=g.add("RandomNoise", noise_seed=seed)(),
@@ -464,7 +531,7 @@ def reverse_film(still, pose, plan, seed, prefix, post=None):
                 latent_image=cond(1))
     frames = g.add("VAEDecode", samples=out(0), vae=vae())()
     if post:  # H3 only pins the first frame's background: hold the defocused place behind every frame
-        frames = matted(g, frames, defocused(g, post, W, H), 73)()
+        frames = matted(g, frames, defocused(g, post, w, h), REV_FRAMES)()
     g.add("SaveVideo", video=g.add("CreateVideo", fps=float(FPS), images=frames,
                                    audio=g.add("VAEDecodeAudio", samples=out(0), vae=avae())())(),
           filename_prefix=prefix + "_reverse", format="mp4", codec="h264")
@@ -474,7 +541,27 @@ def reverse_film(still, pose, plan, seed, prefix, post=None):
 SHUTTER = Path(__file__).parent / "sfx" / "dslr_shutter.wav"  # a real DSLR (see sfx/CREDITS.md)
 
 
-def cut(take, reverse, out, keep=2.0):
+def punch_in(video, center, out):
+    """The camera pushes in on the photographer's camera over the reverse shot's last PUNCH_TIME (eased), ending as
+    the shutter fires: crops of the REV_SCALE render, so the end of the push stays sharp. `center`: the camera, in
+    that render's pixels."""
+    with tempfile.TemporaryDirectory() as d:
+        subprocess.run(["ffmpeg", "-v", "error", "-i", str(video), f"{d}/%04d.png"], check=True)
+        for i, f in enumerate(sorted(Path(d).glob("*.png"))):
+            u = min(1.0, max(0.0, (i / FPS - (REV_KEEP - PUNCH_TIME)) / PUNCH_TIME))
+            e = u * u * (3 - 2 * u)
+            im = Image.open(f)
+            cw, ch = im.width / (1 + (PUNCH - 1) * e), im.height / (1 + (PUNCH - 1) * e)
+            cx = im.width / 2 + (center[0] - im.width / 2) * e
+            cy = im.height / 2 + (center[1] - im.height / 2) * e
+            x0, y0 = min(max(0.0, cx - cw / 2), im.width - cw), min(max(0.0, cy - ch / 2), im.height - ch)
+            im.convert("RGB").resize((W, H), Image.LANCZOS, box=(x0, y0, x0 + cw, y0 + ch)).save(f)
+        subprocess.run(["ffmpeg", "-v", "error", "-y", "-framerate", str(FPS), "-i", f"{d}/%04d.png", "-i", str(video),
+                        "-map", "0:v", "-map", "1:a", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "14",
+                        "-c:a", "copy", str(out)], check=True)
+
+
+def cut(take, reverse, out, keep=REV_KEEP):
     """The take, then the reverse shot's first `keep` seconds (it starts where the take ends: the same pose), and
     the shutter on its last beat: a recorded shutter laid in like foley, not whatever H3 may or may not voice.
     The place keeps sounding across the cut: a stretch of the take's own ambience (from its middle, so nothing
@@ -556,6 +643,33 @@ def stage_cd(sheet, scene, mask, plan, seed, prefix):
     return g
 
 
+def reverse(od, tag, pu, su, plan, seed, raw):
+    """The reverse shot, from the push-in's own photographer (its steps in `od`), cut after the push-in `raw`.
+    -> the cut."""
+    cutout(od / f"{tag}_openhi.png", od / f"{tag}_openmask.png", od / f"{tag}_revcut.png")
+    cu = comfy.upload(str(od / f"{tag}_revcut.png"), f"momento_{tag}_revcut.png")
+    files = run(reverse_still(pu, cu, held(cu, f"momento/{tag}"), seed, f"momento/{tag}"))
+    for k in ("revcutref", "revrefpose", "revposed", "revdressed", "revwho", "revpose", "revcam"):
+        fetch(files[k][0], od / f"{tag}_{k}.png")
+    if face_points(od / f"{tag}_revrefpose.png") <= FACE_MAX:
+        raise SystemExit(f"[{tag}] the turned-around photographer doesn't face the camera; not dressing the reverse "
+                         "shot from their back")
+    who, skel, cam = (Image.open(od / f"{tag}_{k}.png") for k in ("revwho", "revpose", "revcam"))
+    box = framed(who.size, skel, cam)
+    size = (round(W * REV_SCALE / 32) * 32, round(H * REV_SCALE / 32) * 32)
+    for k, im in (("revkey", who), ("revposekey", skel), ("revcamkey", cam)):
+        im.convert("RGB").resize(who.size).crop(box).resize(size, Image.LANCZOS).save(od / f"{tag}_{k}.png")
+    ys, xs = np.nonzero(np.asarray(Image.open(od / f"{tag}_revcamkey.png").convert("L")) > 127)
+    center = (xs.mean(), ys.mean()) if len(xs) else (size[0] / 2, size[1] / 3)
+    files = run(reverse_film(comfy.upload(str(od / f"{tag}_revkey.png"), f"momento_{tag}_revkey.png"),
+                             comfy.upload(str(od / f"{tag}_revposekey.png"), f"momento_{tag}_revposekey.png"),
+                             plan, seed, f"momento/{tag}", post=su))
+    fetch(files["reverse"][0], od / f"{tag}_reverse.mp4")
+    punch_in(od / f"{tag}_reverse.mp4", center, od / f"{tag}_punched.mp4")
+    cut(raw, od / f"{tag}_punched.mp4", od / f"{tag}_cut.mp4")
+    return od / f"{tag}_cut.mp4"
+
+
 def main(profile, post, out="out"):
     name, t = Path(post).stem, time.time()
     seed = int(os.environ.get("SEED") or random.randrange(2**31))
@@ -596,23 +710,9 @@ def main(profile, post, out="out"):
                                 for k in ("first", "last")), plan, seed, f"momento/{tag}"))
         raw, final = od / f"{tag}_raw.mp4", Path(out) / f"{tag}.mp4"
         fetch(files["raw"][0], raw)
-        if REVERSE != "none":  # cut to the photographer taking the picture; the shutter ends it
-            pose = comfy.upload(str(POSES / f"{REVERSE.replace(' ', '_')}.png"),
-                                f"momento_pose_{REVERSE.replace(' ', '_')}.png")
-            files = run(reverse_still(pu, su, comfy.upload(str(od / f"{tag}_sheet.png"), f"momento_{tag}_sheet.png"),
-                                      plan, seed, f"momento/{tag}", pose))
-            fetch(files["revstill"][0], od / f"{tag}_revstill.png")
-            # framed chest-up, the still and its skeleton cut identically
-            skel = Image.open(POSES / f"{REVERSE.replace(' ', '_')}.png")
-            chest_up(Image.open(od / f"{tag}_revstill.png").convert("RGB"), skel).save(od / f"{tag}_revkey.png")
-            chest_up(skel.convert("RGB").resize((768, 1312)), skel).save(od / f"{tag}_revpose.png")
-            files = run(reverse_film(comfy.upload(str(od / f"{tag}_revkey.png"), f"momento_{tag}_revkey.png"),
-                                     comfy.upload(str(od / f"{tag}_revpose.png"), f"momento_{tag}_revpose.png"),
-                                     plan, seed, f"momento/{tag}", post=su))
-            fetch(files["reverse"][0], od / f"{tag}_reverse.mp4")
-            cut(raw, od / f"{tag}_reverse.mp4", od / f"{tag}_cut.mp4")
-            raw = od / f"{tag}_cut.mp4"
-        reveal(str(raw), post, str(final), click=REVERSE == "none")
+        if REVERSE:  # cut to the photographer taking the picture; the push-in on their camera and the shutter end it
+            raw = reverse(od, tag, pu, su, plan, seed, raw)
+        reveal(str(raw), post, str(final), click=not REVERSE)
         print(f"[{tag}] ({time.time() - t:.0f}s) {final}", flush=True)
         return
     files = run(stage_ab(pu, su, plan, seed, f"momento/{tag}"))
