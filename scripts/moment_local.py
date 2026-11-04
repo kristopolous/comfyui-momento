@@ -350,7 +350,7 @@ def reverse_film(still, pose, plan, seed, prefix):
     text = ("integrated_multimodal_description: A tight cinematic close-up, the camera locked off on a long lens. The "
             f"photographer, {local.CAM['hold']}, holds it steady, intent behind the camera, and presses the shutter "
             "at the very end. Shallow depth of field, the background soft."
-            f"\noverall_soundscape: {plan['soundscape']} At the very end, {local.CAM['click']}."
+            f"\noverall_soundscape: {plan['soundscape']}"
             "\nnon_diegetic_music: N/A")
     vae, avae = g.add("VAELoader", vae_name=H3["vae"]), g.add("VAELoader", vae_name=H3["audio_vae"])
     model = g.add("LoraLoaderModelOnly", lora_name=H3["lora"], strength_model=1.0,
@@ -373,23 +373,21 @@ def reverse_film(still, pose, plan, seed, prefix):
     return g
 
 
-def shutter_at(video):
-    """When the shutter fires: the sharpest rise in the audio's loudness (10 ms windows), in seconds."""
-    raw = subprocess.run(["ffmpeg", "-v", "error", "-i", str(video), "-ac", "1", "-ar", "16000", "-f", "s16le", "-"],
-                         capture_output=True, check=True).stdout
-    a = np.frombuffer(raw, dtype=np.int16).astype(float) / 32768
-    level = np.sqrt((a[: len(a) // 160 * 160].reshape(-1, 160) ** 2).mean(1))
-    return float(np.argmax(np.diff(level, prepend=level[0]))) * 0.01
+SHUTTER = Path(__file__).parent / "sfx" / "dslr_shutter.wav"  # a real DSLR (see sfx/CREDITS.md)
 
 
 def cut(take, reverse, out, keep=2.0):
-    """The take, then the reverse shot's last `keep` seconds, ending on its shutter (the reveal's flash follows)."""
-    end = shutter_at(reverse) + 0.12
-    start = max(0.0, end - keep)
-    subprocess.run(["ffmpeg", "-v", "error", "-y", "-i", str(take), "-i", str(reverse), "-filter_complex",
-                    f"[1:v]trim={start:.3f}:{end:.3f},setpts=PTS-STARTPTS[r];"
-                    f"[1:a]atrim={start:.3f}:{end:.3f},asetpts=PTS-STARTPTS[ra];"
-                    "[0:v][0:a][r][ra]concat=n=2:v=1:a=1[v][a]", "-map", "[v]", "-map", "[a]",
+    """The take, then the reverse shot's first `keep` seconds (it starts where the take ends: the same pose), and
+    the shutter on its last beat: a recorded shutter laid in like foley, not whatever H3 may or may not voice."""
+    click_at = keep - 0.25  # the shutter, then a beat of it before the reveal's flash
+    subprocess.run(["ffmpeg", "-v", "error", "-y", "-i", str(take), "-i", str(reverse), "-i", str(SHUTTER),
+                    "-filter_complex",
+                    f"[1:v]trim=0:{keep:.3f},setpts=PTS-STARTPTS[r];"
+                    f"[1:a]atrim=0:{keep:.3f},asetpts=PTS-STARTPTS,aresample=48000,aformat=channel_layouts=stereo[ra];"
+                    f"[2:a]adelay={int(click_at * 1000)}:all=1,apad,atrim=0:{keep:.3f}[c];"
+                    "[ra][c]amix=inputs=2:normalize=0[rc];"
+                    "[0:a]aresample=48000,aformat=channel_layouts=stereo[ta];"
+                    "[0:v][ta][r][rc]concat=n=2:v=1:a=1[v][a]", "-map", "[v]", "-map", "[a]",
                     "-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "14", "-c:a", "aac", str(out)], check=True)
 
 
