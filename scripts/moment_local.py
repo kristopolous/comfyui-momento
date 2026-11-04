@@ -56,7 +56,7 @@ assert PLAN != local.PLAN
 #   smartphone: from the subject's side, the phone held sideways in both hands, its lenses aimed down ours, the eyes
 #   over the top of it (the face stays in view; "phone front"/"phone front mid" hide it behind the phone)
 #   dslr: Rear Window, the eye at the viewfinder, the long lens leaving the frame past us
-REVERSE = os.environ.get("REVERSE") or {"smartphone": "phone landscape", "dslr": "rear window film"}[CAMERA]
+REVERSE = os.environ.get("REVERSE") or {"smartphone": "phone landscape", "dslr": "standing dslr"}[CAMERA]
 # skeletons (SDPose, whole body) of the films' photographer poses, each extracted from the source cropped to the
 # photographer's upper body in the frame's own aspect, so the skeleton fills the frame where they will be
 POSES = Path(__file__).parent / "poses"
@@ -338,11 +338,35 @@ def reverse_still(profile, post, sheet, plan, seed, prefix, pose):
         "KSampler", model=swap(), seed=seed + 8, steps=QWEN_STEPS, cfg=1.0, sampler_name="euler", scheduler="simple",
         positive=enc(0), negative=enc(1), denoise=1.0,
         latent_image=g.add("EmptyLatentImage", width=768, height=1312, batch_size=1)())())
-    g.add("SaveImage", images=who(), filename_prefix=prefix + "_revstill")
+    # 3. where: a long lens has nothing sharp behind them, so the background is the real place, defocused: the
+    #    photographer matted (BiRefNet, a real alpha) over the post itself, scaled to the frame and blurred hard
+    #    (no invented scenery behind them; Qwen's own background put a parked car at head height)
+    still = matted(g, who(), defocused(g, post, 768, 1312))
+    g.add("SaveImage", images=who(), filename_prefix=prefix + "_revswapped")
+    g.add("SaveImage", images=still(), filename_prefix=prefix + "_revstill")
     return g
 
 
-def reverse_film(still, pose, plan, seed, prefix):
+def defocused(g, post, width, height):
+    """The real place behind a long-lens close-up: the post scaled to the frame, blurred hard (ImageBlur tops out
+    at radius 31, so it is repeated)."""
+    plate = g.add("ImageScale", image=g.add("LoadImage", image=post)(0), upscale_method="lanczos", width=width,
+                  height=height, crop="center")
+    for _ in range(3):
+        plate = g.add("ImageBlur", image=plate(), blur_radius=31, sigma=10.0)
+    return plate
+
+
+def matted(g, images, plate, frames=1):
+    """`images` (a batch) matted with BiRefNet (a real alpha) over `plate`, every frame."""
+    matte = g.add("RemoveBackground", image=images, bg_removal_model=g.add(
+        "LoadBackgroundRemovalModel", bg_removal_name="birefnet.safetensors")())
+    behind = g.add("RepeatImageBatch", image=plate(), amount=frames) if frames > 1 else plate
+    return g.add("ImageCompositeMasked", destination=behind(), source=images, x=0, y=0, resize_source=False,
+                 mask=matte(0))
+
+
+def reverse_film(still, pose, plan, seed, prefix, post=None):
     """H3 animates the reverse shot, the camera locked off. It continues the cut: the push-in ends on the placed
     keyframe, camera already up, so the pose is held there (the Fun ControlNet-Union on the same skeleton, every
     frame), and the shutter fires at the end."""
@@ -367,7 +391,10 @@ def reverse_film(still, pose, plan, seed, prefix):
                 sampler=g.add("KSamplerSelect", sampler_name="res_multistep")(),
                 sigmas=g.add("BasicScheduler", model=model(), scheduler="simple", steps=8, denoise=1.0)(),
                 latent_image=cond(1))
-    g.add("SaveVideo", video=g.add("CreateVideo", fps=float(FPS), images=g.add("VAEDecode", samples=out(0), vae=vae())(),
+    frames = g.add("VAEDecode", samples=out(0), vae=vae())()
+    if post:  # H3 only pins the first frame's background: hold the defocused place behind every frame
+        frames = matted(g, frames, defocused(g, post, W, H), 73)()
+    g.add("SaveVideo", video=g.add("CreateVideo", fps=float(FPS), images=frames,
                                    audio=g.add("VAEDecodeAudio", samples=out(0), vae=avae())())(),
           filename_prefix=prefix + "_reverse", format="mp4", codec="h264")
     return g
@@ -494,7 +521,7 @@ def main(profile, post, out="out"):
                 Image.open(src).convert("RGB").resize((W, H), Image.LANCZOS).save(dst)
             files = run(reverse_film(comfy.upload(str(od / f"{tag}_revkey.png"), f"momento_{tag}_revkey.png"),
                                      comfy.upload(str(od / f"{tag}_revpose.png"), f"momento_{tag}_revpose.png"),
-                                     plan, seed, f"momento/{tag}"))
+                                     plan, seed, f"momento/{tag}", post=su))
             fetch(files["reverse"][0], od / f"{tag}_reverse.mp4")
             cut(raw, od / f"{tag}_reverse.mp4", od / f"{tag}_cut.mp4")
             raw = od / f"{tag}_cut.mp4"
